@@ -812,7 +812,7 @@ async def main():
             "- MACD (multi-TF confluence)\n"
             "- EMA 8/21/50/100/200\n"
             "- Bollinger Bands\n"
-            "- Williams %R\n"
+            "- Williams %%R\n"
             "- ATR-based SL/TP\n"
             "- VWAP + OBV\n"
             "- Market Structure (HH/HL/LH/LL)\n"
