@@ -1,581 +1,601 @@
+import os
 import time
 import logging
 import requests
 import asyncio
 from telegram import Bot
+from datetime import datetime, timezone
 
 # ── Config ────────────────────────────────────────────────────────────────────
-TELEGRAM_TOKEN = "8829673667:AAHA12D1jwgyKZFz6AcuBrwfQHBMpwIaZfQ"
-CHAT_ID = "6503316066E"
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
+CHAT_ID          = os.environ.get("CHAT_ID",        "YOUR_CHAT_ID_HERE")
 
-SCAN_INTERVAL = 120
-MIN_OPPORTUNITY_SCORE = 75
-MAX_RISK_SCORE = 40
-CHAINS = ["solana", "ethereum", "base", "bsc"]
-DS_BASE = "https://api.dexscreener.com"
-RUGCHECK_BASE = "https://api.rugcheck.xyz/v1"
+SCAN_INTERVAL    = 90          # seconds between scans
+GEM_THRESHOLD    = 72          # minimum gem score (0-100)
+MAX_MCAP         = 2_000_000   # max $2M mcap
+MIN_LIQUIDITY    = 15_000      # min $15K liquidity
+MIN_HOLDERS      = 50          # min holder proxy
+SIGNAL_COOLDOWN  = 3600        # 1hr cooldown per token
+
+DS_BASE          = "https://api.dexscreener.com"
+HL_API           = "https://api.hyperliquid.xyz/info"
+FEAR_GREED_URL   = "https://api.alternative.me/fng/?limit=1"
+BTC_TICKER_URL   = "https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT"
+RUGCHECK_BASE    = "https://api.rugcheck.xyz/v1"
+
+CHAINS = ["solana", "ethereum", "base", "bsc", "hyperevm"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
-# ── Rugcheck Safety Analysis ──────────────────────────────────────────────────
-def check_rugcheck(token_address, chain="solana"):
+# ════════════════════════════════════════════════════════════════════════════
+# SAFE HTTP
+# ════════════════════════════════════════════════════════════════════════════
+
+def get(url, timeout=10, json_body=None):
     try:
-        r = requests.get("%s/tokens/%s/report/summary" % (RUGCHECK_BASE, token_address), timeout=10)
+        if json_body:
+            r = requests.post(url, json=json_body, timeout=timeout,
+                              headers={"Content-Type": "application/json"})
+        else:
+            r = requests.get(url, timeout=timeout)
         if r.status_code == 200:
             return r.json()
     except Exception as e:
-        log.warning("Rugcheck error: %s" % e)
+        log.warning("HTTP error %s: %s" % (url[:60], e))
     return None
 
-def get_safety_score(pair, rug_data):
-    score = 100
+# ════════════════════════════════════════════════════════════════════════════
+# MARKET CONTEXT
+# ════════════════════════════════════════════════════════════════════════════
+
+def fetch_market_context():
+    ctx = {"fear_greed": 50, "btc_chg": 0.0, "btc_price": 0.0}
+    fg = get(FEAR_GREED_URL)
+    if fg and fg.get("data"):
+        ctx["fear_greed"] = int(fg["data"][0].get("value", 50))
+    btc = get(BTC_TICKER_URL)
+    if btc:
+        ctx["btc_chg"]   = float(btc.get("priceChangePercent", 0))
+        ctx["btc_price"] = float(btc.get("lastPrice", 0))
+    return ctx
+
+# ════════════════════════════════════════════════════════════════════════════
+# DEXSCREENER
+# ════════════════════════════════════════════════════════════════════════════
+
+def fetch_boosted_tokens():
+    tokens = []
+    for ep in ["/token-boosts/latest/v1", "/token-boosts/top/v1"]:
+        data = get(DS_BASE + ep)
+        if isinstance(data, list):
+            tokens.extend(data)
+    seen, out = set(), []
+    for t in tokens:
+        k = t.get("tokenAddress", "")
+        if k and k not in seen:
+            seen.add(k); out.append(t)
+    return out
+
+def fetch_new_pairs_chain(chain_id):
+    data = get("%s/token-search/v1/search?q=&chainId=%s&sort=createdAt&order=desc&limit=25" % (DS_BASE, chain_id))
+    return (data or {}).get("pairs", [])
+
+def fetch_token_pairs(chain_id, token_address):
+    data = get("%s/token-pairs/v1/%s/%s" % (DS_BASE, chain_id, token_address))
+    return data if isinstance(data, list) else []
+
+# ════════════════════════════════════════════════════════════════════════════
+# HYPERLIQUID / HYPEREVM
+# ════════════════════════════════════════════════════════════════════════════
+
+def fetch_hl_spot_tokens():
+    data = get(HL_API, json_body={"type": "spotMetaAndAssetCtxs"})
+    if not data or len(data) < 2:
+        return []
+    tokens  = data[0].get("tokens", [])
+    pairs   = data[0].get("universe", [])
+    ctxs    = data[1] if isinstance(data[1], list) else []
+
+    results = []
+    for i, pair in enumerate(pairs):
+        ctx = ctxs[i] if i < len(ctxs) else {}
+        mark_px   = float(ctx.get("markPx", 0) or 0)
+        prev_px   = float(ctx.get("prevDayPx", 0) or 0)
+        vol_24h   = float(ctx.get("dayNtlVlm", 0) or 0)
+        if mark_px == 0 or vol_24h < 5000:
+            continue
+        chg_24h = (mark_px - prev_px) / prev_px * 100 if prev_px > 0 else 0
+        token_idxs = pair.get("tokens", [])
+        base_token = next((t for t in tokens if t.get("index") == token_idxs[0]), {}) if token_idxs else {}
+        name = base_token.get("name", "???")
+        results.append({
+            "name":       name,
+            "symbol":     name,
+            "chain":      "hyperevm",
+            "mark_px":    mark_px,
+            "prev_px":    prev_px,
+            "vol_24h":    vol_24h,
+            "chg_24h":    chg_24h,
+            "pair_index": i,
+            "source":     "hyperliquid",
+        })
+    return results
+
+def fetch_hl_token_details(token_id):
+    return get(HL_API, json_body={"type": "tokenDetails", "tokenId": token_id})
+
+# ════════════════════════════════════════════════════════════════════════════
+# RUGCHECK
+# ════════════════════════════════════════════════════════════════════════════
+
+def rugcheck(token_address, chain="solana"):
+    if chain != "solana":
+        return None, []
+    data = get("%s/tokens/%s/report/summary" % (RUGCHECK_BASE, token_address))
+    if not data:
+        return None, []
     risks = []
-    warnings = []
+    score = 100
+    for r in (data.get("risks") or []):
+        name  = r.get("name", "").lower()
+        level = r.get("level", "").lower()
+        if level in ("danger", "critical"):
+            if any(k in name for k in ("honeypot", "mint", "freeze", "blacklist", "rug")):
+                return 0, ["HARD REJECT: %s" % r.get("name")]
+            score -= 25
+            risks.append(r.get("name", "Unknown"))
+        elif level == "warn":
+            score -= 10
+            risks.append(r.get("name", "Warning"))
+    holders = data.get("topHolders") or []
+    if holders:
+        top1  = holders[0].get("pct", 0)
+        top10 = sum(h.get("pct", 0) for h in holders[:10])
+        if top1 > 15:
+            return 0, ["HARD REJECT: Top wallet %.1f%%" % top1]
+        if top10 > 50:
+            return 0, ["HARD REJECT: Top 10 hold %.1f%%" % top10]
+        if top1 > 8:
+            score -= 15; risks.append("Top wallet %.1f%%" % top1)
+        if top10 > 35:
+            score -= 10; risks.append("Top 10 hold %.1f%%" % top10)
+    lp_locked = data.get("lpLocked", False)
+    if lp_locked:
+        score += 10
+    return max(0, min(score, 100)), risks
 
-    # Liquidity checks
-    liq = (pair.get("liquidity") or {}).get("usd") or 0
-    if liq < 20000:
-        return 0, ["REJECT: Liquidity below $20K"]
-    elif liq < 50000:
-        score -= 20
-        warnings.append("Low liquidity ($%sK)" % round(liq/1000, 1))
-    elif liq >= 100000:
-        score += 5
+# ════════════════════════════════════════════════════════════════════════════
+# TECHNICAL SCORING (price-based, no candle data needed)
+# ════════════════════════════════════════════════════════════════════════════
 
-    # Holder concentration
-    if rug_data:
-        top_holders = rug_data.get("topHolders") or []
-        if top_holders:
-            top1 = top_holders[0].get("pct", 0) if top_holders else 0
-            top10 = sum(h.get("pct", 0) for h in top_holders[:10])
-            if top1 > 10:
-                return 0, ["REJECT: Top wallet holds %.1f%%" % top1]
-            elif top1 > 5:
-                score -= 15
-                warnings.append("Top wallet %.1f%%" % top1)
-            if top10 > 40:
-                return 0, ["REJECT: Top 10 holders own %.1f%%" % top10]
-            elif top10 > 25:
-                score -= 10
-                warnings.append("Top 10 own %.1f%%" % top10)
+def score_momentum(pair):
+    score   = 0
+    signals = []
 
-        # Mint/freeze checks
-        risks_data = rug_data.get("risks") or []
-        for risk in risks_data:
-            name = risk.get("name", "").lower()
-            level = risk.get("level", "").lower()
-            if "mint" in name or "freeze" in name or "honeypot" in name:
-                if level in ["danger", "critical"]:
-                    return 0, ["REJECT: %s detected" % risk.get("name")]
-                else:
-                    score -= 20
-                    warnings.append(risk.get("name","Unknown risk"))
+    mcap      = pair.get("marketCap") or pair.get("fdv") or 0
+    vol_24h   = (pair.get("volume") or {}).get("h24") or pair.get("vol_24h") or 0
+    vol_h1    = (pair.get("volume") or {}).get("h1") or 0
+    vol_h6    = (pair.get("volume") or {}).get("h6") or 0
+    chg_24h   = (pair.get("priceChange") or {}).get("h24") or pair.get("chg_24h") or 0
+    chg_h1    = (pair.get("priceChange") or {}).get("h1") or 0
+    chg_h6    = (pair.get("priceChange") or {}).get("h6") or 0
+    liq       = (pair.get("liquidity") or {}).get("usd") or 0
+    txns      = (pair.get("txns") or {})
+    buys_h1   = (txns.get("h1") or {}).get("buys", 0)
+    sells_h1  = (txns.get("h1") or {}).get("sells", 0)
+    buys_h24  = (txns.get("h24") or {}).get("buys", 0)
+    sells_h24 = (txns.get("h24") or {}).get("sells", 0)
+    created   = pair.get("pairCreatedAt")
+    age_mins  = (time.time()*1000 - created)/60000 if created else 9999
+
+    vol_ratio = vol_24h / mcap if mcap > 0 else 0
+    bs_ratio  = buys_h1 / sells_h1 if sells_h1 > 0 else buys_h1
+
+    # Volume/MCap ratio
+    if vol_ratio > 3:   score += 25; signals.append("Vol/MCap ratio %.1fx (extreme)" % vol_ratio)
+    elif vol_ratio > 1.5: score += 18; signals.append("Vol/MCap ratio %.1fx (high)" % vol_ratio)
+    elif vol_ratio > 0.5: score += 10
+
+    # Buy/Sell ratio
+    if bs_ratio > 4:  score += 20; signals.append("Buy/Sell ratio %.1fx (strong buyers)" % bs_ratio)
+    elif bs_ratio > 2.5: score += 14; signals.append("Buy/Sell ratio %.1fx" % bs_ratio)
+    elif bs_ratio > 1.5: score += 8
+
+    # Price momentum multi-timeframe
+    if chg_h1 > 30:  score += 15; signals.append("1h price +%.1f%% (strong pump)" % chg_h1)
+    elif chg_h1 > 15: score += 8
+    if chg_24h > 50: score += 10; signals.append("24h price +%.1f%%" % chg_24h)
+    elif chg_24h > 20: score += 5
+    if chg_h1 > 0 and chg_h6 > 0 and chg_24h > 0:
+        score += 8; signals.append("Sustained uptrend all timeframes")
+
+    # Volume acceleration
+    if vol_h6 > 0 and vol_h1 > 0:
+        h1_vs_avg = vol_h1 / (vol_h6 / 6)
+        if h1_vs_avg > 4:  score += 15; signals.append("Volume acceleration %.1fx avg" % h1_vs_avg)
+        elif h1_vs_avg > 2: score += 8
+
+    # Freshness bonus
+    if age_mins < 30:    score += 20; signals.append("Very new token (%dm old)" % int(age_mins))
+    elif age_mins < 90:  score += 13; signals.append("New token (%dm old)" % int(age_mins))
+    elif age_mins < 360: score += 6
+
+    # Transaction activity
+    total_txns = buys_h24 + sells_h24
+    if total_txns > 1000: score += 8; signals.append("%d transactions 24h" % total_txns)
+    elif total_txns > 300: score += 4
+
+    # Liquidity health
+    if liq > 100_000: score += 8; signals.append("Strong liquidity %s" % fmt_usd(liq))
+    elif liq > 50_000: score += 5
+    elif liq > 15_000: score += 2
+
+    return min(score, 100), signals, bs_ratio, age_mins
+
+def score_safety(pair, rug_score, rug_risks):
+    score    = 50
+    warnings = list(rug_risks)
+
+    if rug_score == 0:
+        return 0, warnings
+
+    liq     = (pair.get("liquidity") or {}).get("usd") or 0
+    mcap    = pair.get("marketCap") or pair.get("fdv") or 0
+    chain   = pair.get("chainId", "")
+
+    # Rugcheck result
+    if rug_score >= 90: score += 30
+    elif rug_score >= 70: score += 20
+    elif rug_score >= 50: score += 10
+    else: score -= 10
+
+    # Liquidity/MCap ratio
+    if mcap > 0 and liq > 0:
+        liq_ratio = liq / mcap
+        if liq_ratio > 0.3: score += 15; 
+        elif liq_ratio > 0.15: score += 8
+        elif liq_ratio < 0.03: score -= 15; warnings.append("Low liq/mcap ratio")
+
+    # Chain bonus
+    if chain in ("ethereum", "base"): score += 5
+    elif chain == "solana": score += 3
 
     return max(0, min(score, 100)), warnings
 
-# ── Momentum Analysis ─────────────────────────────────────────────────────────
-def get_momentum_score(pair):
-    score = 0
+def score_market_context(ctx, chg_24h):
+    score   = 0
     signals = []
+    fg      = ctx.get("fear_greed", 50)
+    btc_chg = ctx.get("btc_chg", 0)
 
-    vol_h1  = (pair.get("volume") or {}).get("h1") or 0
-    vol_h6  = (pair.get("volume") or {}).get("h6") or 0
-    vol_h24 = (pair.get("volume") or {}).get("h24") or 0
+    if fg < 20:   score += 15; signals.append("Extreme Fear FGI=%d (buy zone)" % fg)
+    elif fg < 35: score += 8;  signals.append("Fear FGI=%d" % fg)
+    elif fg > 80: score -= 10; signals.append("Extreme Greed FGI=%d (caution)" % fg)
+    elif fg > 65: score -= 5
+
+    if btc_chg > 3:  score += 10; signals.append("BTC +%.1f%% (bullish macro)" % btc_chg)
+    elif btc_chg > 1: score += 5
+    elif btc_chg < -5: score -= 15; signals.append("BTC %.1f%% (bearish macro)" % btc_chg)
+    elif btc_chg < -2: score -= 8
+
+    if chg_24h > 0 and btc_chg > 0: score += 5
+
+    return max(0, min(score, 50)), signals
+
+# ════════════════════════════════════════════════════════════════════════════
+# MASTER GEM ANALYZER
+# ════════════════════════════════════════════════════════════════════════════
+
+def analyze_gem(pair, ctx):
+    chain   = pair.get("chainId", pair.get("chain", "unknown"))
+    symbol  = (pair.get("baseToken") or {}).get("symbol", pair.get("symbol", "???")).upper()
+    name    = (pair.get("baseToken") or {}).get("name", pair.get("name", ""))
     mcap    = pair.get("marketCap") or pair.get("fdv") or 0
     liq     = (pair.get("liquidity") or {}).get("usd") or 0
-
-    chg_h1  = (pair.get("priceChange") or {}).get("h1") or 0
-    chg_h6  = (pair.get("priceChange") or {}).get("h6") or 0
-    chg_h24 = (pair.get("priceChange") or {}).get("h24") or 0
-
-    txns    = (pair.get("txns") or {})
-    buys_h1 = (txns.get("h1") or {}).get("buys", 0)
-    sells_h1 = (txns.get("h1") or {}).get("sells", 0)
-    buys_h24 = (txns.get("h24") or {}).get("buys", 0)
-    sells_h24 = (txns.get("h24") or {}).get("sells", 0)
-
-    # Volume/MCap ratio
-    vol_ratio = vol_h24 / mcap if mcap > 0 else 0
-    if vol_ratio > 3:
-        score += 25
-        signals.append("Extreme volume (%.1fx mcap)" % vol_ratio)
-    elif vol_ratio > 1.5:
-        score += 18
-        signals.append("High volume (%.1fx mcap)" % vol_ratio)
-    elif vol_ratio > 0.5:
-        score += 10
-
-    # Buy/sell ratio
-    bs_ratio_h1 = buys_h1 / sells_h1 if sells_h1 > 0 else buys_h1
-    bs_ratio_h24 = buys_h24 / sells_h24 if sells_h24 > 0 else buys_h24
-    if bs_ratio_h1 > 3:
-        score += 20
-        signals.append("Strong buy pressure (%.1fx buys vs sells)" % bs_ratio_h1)
-    elif bs_ratio_h1 > 2:
-        score += 12
-        signals.append("Good buy/sell ratio (%.1fx)" % bs_ratio_h1)
-
-    # Price momentum
-    if chg_h1 > 50:
-        score += 15
-        signals.append("1h price +%.0f%%" % chg_h1)
-    elif chg_h1 > 20:
-        score += 8
-    if chg_h24 > 0 and chg_h1 > 0:
-        score += 5
-        signals.append("Sustained uptrend")
-
-    # Volume acceleration (h1 vs h6 average)
-    if vol_h6 > 0:
-        h1_vs_avg = vol_h1 / (vol_h6 / 6) if vol_h6 > 0 else 1
-        if h1_vs_avg > 3:
-            score += 15
-            signals.append("Volume accelerating (%.1fx avg)" % h1_vs_avg)
-        elif h1_vs_avg > 1.5:
-            score += 8
-
-    return min(score, 100), signals, bs_ratio_h1
-
-# ── Smart Money Detection ─────────────────────────────────────────────────────
-def get_smart_money_score(pair):
-    score = 0
-    signals = []
-
-    # Use transaction patterns as proxy for smart money
-    txns = (pair.get("txns") or {})
-    buys_h1 = (txns.get("h1") or {}).get("buys", 0)
-    buys_h6 = (txns.get("h6") or {}).get("buys", 0)
-    buys_h24 = (txns.get("h24") or {}).get("buys", 0)
-
-    vol_h1 = (pair.get("volume") or {}).get("h1") or 0
-    vol_h24 = (pair.get("volume") or {}).get("h24") or 0
-
-    # Large average transaction size = whale interest
-    avg_tx_size = vol_h1 / buys_h1 if buys_h1 > 0 else 0
-    if avg_tx_size > 5000:
-        score += 30
-        signals.append("Large avg tx $%.0f (whale activity)" % avg_tx_size)
-    elif avg_tx_size > 1000:
-        score += 20
-        signals.append("Medium avg tx $%.0f" % avg_tx_size)
-    elif avg_tx_size > 500:
-        score += 10
-
-    # Consistent buying across timeframes
-    if buys_h6 > 0 and buys_h24 > 0:
-        h1_pct = buys_h1 / buys_h24 * 100 if buys_h24 > 0 else 0
-        if h1_pct > 20:
-            score += 20
-            signals.append("Buying accelerating (%.0f%% of 24h in last 1h)" % h1_pct)
-        elif h1_pct > 10:
-            score += 10
-
-    # Volume distribution
-    if vol_h24 > 0:
-        recent_vol_pct = vol_h1 / vol_h24 * 100
-        if recent_vol_pct > 25:
-            score += 20
-            signals.append("Recent volume surge (%.0f%% of 24h in last 1h)" % recent_vol_pct)
-
-    if not signals:
-        signals.append("No smart money signals detected")
-
-    return min(score, 100), signals
-
-# ── Liquidity Quality ─────────────────────────────────────────────────────────
-def get_liquidity_score(pair):
-    score = 0
-    liq = (pair.get("liquidity") or {}).get("usd") or 0
-    mcap = pair.get("marketCap") or pair.get("fdv") or 0
-
-    if liq >= 100000:
-        score += 40
-    elif liq >= 50000:
-        score += 25
-    elif liq >= 20000:
-        score += 10
-
-    # Liquidity/MCap ratio (higher = safer)
-    liq_ratio = liq / mcap if mcap > 0 else 0
-    if liq_ratio > 0.3:
-        score += 40
-    elif liq_ratio > 0.15:
-        score += 25
-    elif liq_ratio > 0.05:
-        score += 10
-
-    # Bonus for growing liquidity
-    vol_h24 = (pair.get("volume") or {}).get("h24") or 0
-    if vol_h24 > liq:
-        score += 20
-
-    return min(score, 100)
-
-# ── Risk Score ────────────────────────────────────────────────────────────────
-def get_risk_score(pair, rug_data, safety_score):
-    risk = 100 - safety_score
-
-    liq = (pair.get("liquidity") or {}).get("usd") or 0
-    mcap = pair.get("marketCap") or pair.get("fdv") or 0
+    vol_24h = (pair.get("volume") or {}).get("h24") or pair.get("vol_24h") or 0
+    chg_24h = (pair.get("priceChange") or {}).get("h24") or pair.get("chg_24h") or 0
+    price   = float((pair.get("priceUsd") or pair.get("mark_px") or 0))
+    addr    = (pair.get("baseToken") or {}).get("address", pair.get("tokenAddress", ""))
+    pair_addr = pair.get("pairAddress", addr)
+    url     = pair.get("url") or "https://dexscreener.com/%s/%s" % (chain, pair_addr)
     created = pair.get("pairCreatedAt")
-    age_hours = (time.time() * 1000 - created) / 3600000 if created else 999
+    age_mins = (time.time()*1000 - created)/60000 if created else 9999
 
-    # Age risk
-    if age_hours < 1:
-        risk += 20
-    elif age_hours < 6:
-        risk += 10
-    elif age_hours < 24:
-        risk += 5
+    # Hard filters
+    if mcap > MAX_MCAP and mcap > 0:   return None
+    if liq < MIN_LIQUIDITY and liq > 0: return None
+    if age_mins > 1440:                 return None  # max 24h old
 
-    # Low liquidity risk
-    if liq < 30000:
-        risk += 15
-    elif liq < 50000:
-        risk += 8
+    # Rugcheck (Solana only)
+    rug_score, rug_risks = 75, []  # default for non-Solana
+    if chain == "solana" and addr:
+        rug_score, rug_risks = rugcheck(addr, chain)
+        time.sleep(0.3)
+        if rug_score == 0:
+            return None
 
-    # Very small mcap risk
-    if mcap > 0 and mcap < 50000:
-        risk += 10
+    # Score components
+    mom_score, mom_signals, bs_ratio, age_m = score_momentum(pair)
+    saf_score, saf_warnings                 = score_safety(pair, rug_score, rug_risks)
+    ctx_score, ctx_signals                  = score_market_context(ctx, chg_24h)
 
-    return min(risk, 100)
+    # Catapult/HyperEVM bonus
+    catapult_bonus = 0
+    catapult_note  = ""
+    if chain == "hyperevm":
+        catapult_bonus = 12
+        catapult_note  = "HyperEVM/Catapult ecosystem token"
 
-# ── Conviction Tier ───────────────────────────────────────────────────────────
-def get_conviction_tier(opp_score, risk_score):
-    if opp_score >= 85 and risk_score <= 25:
-        return "S-TIER", "INSTANT ALERT"
-    elif opp_score >= 75 and risk_score <= 35:
-        return "A-TIER", "HIGH CONVICTION"
-    elif opp_score >= 60 and risk_score <= 40:
-        return "B-TIER", "MODERATE"
-    elif opp_score >= 45:
-        return "C-TIER", "WEAK"
-    else:
-        return "REJECT", "NO ALERT"
+    # Weighted final score
+    final_score = int(
+        mom_score * 0.45 +
+        saf_score * 0.30 +
+        ctx_score * 0.15 +
+        catapult_bonus
+    )
+    final_score = min(final_score, 100)
 
-# ── Token Age Formatter ───────────────────────────────────────────────────────
-def fmt_age(pair):
-    created = pair.get("pairCreatedAt")
-    if not created: return "Unknown"
-    mins = int((time.time() * 1000 - created) / 60000)
-    if mins < 60: return "%dm" % mins
-    if mins < 1440: return "%dh %dm" % (mins//60, mins%60)
-    return "%dd" % (mins//1440)
+    if final_score < GEM_THRESHOLD:
+        return None
+
+    # Tier
+    if final_score >= 88:   tier = "S-TIER"
+    elif final_score >= 80: tier = "A-TIER"
+    elif final_score >= 72: tier = "B-TIER"
+    else:                   tier = "WATCH"
+
+    all_signals = mom_signals[:5] + ctx_signals[:2]
+    all_warnings = saf_warnings[:3]
+
+    return {
+        "symbol":        symbol,
+        "name":          name,
+        "chain":         chain,
+        "mcap":          mcap,
+        "liq":           liq,
+        "vol_24h":       vol_24h,
+        "chg_24h":       chg_24h,
+        "price":         price,
+        "age_mins":      age_m,
+        "bs_ratio":      bs_ratio,
+        "rug_score":     rug_score,
+        "mom_score":     mom_score,
+        "saf_score":     saf_score,
+        "ctx_score":     ctx_score,
+        "final_score":   final_score,
+        "tier":          tier,
+        "signals":       all_signals,
+        "warnings":      all_warnings,
+        "catapult_note": catapult_note,
+        "pair_addr":     pair_addr,
+        "url":           url,
+        "fear_greed":    ctx.get("fear_greed", 50),
+        "btc_chg":       ctx.get("btc_chg", 0),
+        "source":        pair.get("source", "dexscreener"),
+    }
+
+# ════════════════════════════════════════════════════════════════════════════
+# MESSAGE BUILDER
+# ════════════════════════════════════════════════════════════════════════════
 
 def fmt_usd(n):
     if not n or n == 0: return "--"
-    if n >= 1000000000: return "$%.2fB" % (n/1000000000)
-    if n >= 1000000: return "$%.2fM" % (n/1000000)
-    if n >= 1000: return "$%.1fK" % (n/1000)
+    if n >= 1e9:  return "$%.2fB" % (n/1e9)
+    if n >= 1e6:  return "$%.2fM" % (n/1e6)
+    if n >= 1e3:  return "$%.1fK" % (n/1e3)
     return "$%.0f" % n
 
-def risk_label(score):
-    if score <= 20: return "LOW RISK"
-    if score <= 40: return "MODERATE RISK"
-    if score <= 60: return "ELEVATED RISK"
-    if score <= 80: return "HIGH RISK"
-    return "EXTREME RISK"
+def fmt_age(mins):
+    if mins >= 1440: return "%dd" % int(mins/1440)
+    if mins >= 60:   return "%dh %dm" % (int(mins/60), int(mins%60))
+    return "%dm" % int(mins)
 
-# ── DexScreener API ───────────────────────────────────────────────────────────
-def fetch_boosted():
-    tokens = []
-    for url in [DS_BASE+"/token-boosts/latest/v1", DS_BASE+"/token-boosts/top/v1"]:
-        try:
-            r = requests.get(url, timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                if isinstance(data, list):
-                    tokens.extend(data)
-        except Exception as e:
-            log.warning("Fetch error: %s" % e)
-    seen = set()
-    unique = []
-    for t in tokens:
-        k = t.get("tokenAddress","")
-        if k and k not in seen:
-            seen.add(k)
-            unique.append(t)
-    return unique
+def fg_label(v):
+    if v < 20: return "Extreme Fear"
+    if v < 40: return "Fear"
+    if v < 60: return "Neutral"
+    if v < 80: return "Greed"
+    return "Extreme Greed"
 
-def fetch_pairs(chain_id, token_address):
-    try:
-        r = requests.get("%s/token-pairs/v1/%s/%s" % (DS_BASE, chain_id, token_address), timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            return data if isinstance(data, list) else []
-    except Exception as e:
-        log.warning("Pairs error: %s" % e)
-    return []
+def chain_label(c):
+    return {"solana":"◎ Solana","ethereum":"Ξ Ethereum","base":"🔵 Base",
+            "bsc":"🟡 BSC","hyperevm":"⚡ HyperEVM/Catapult"}.get(c, c.upper())
 
-def fetch_new_pairs(chain_id):
-    try:
-        url = "%s/token-search/v1/search?q=&chainId=%s&sort=createdAt&order=desc&limit=25" % (DS_BASE, chain_id)
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            return r.json().get("pairs", [])
-    except Exception as e:
-        log.warning("New pairs error: %s" % e)
-    return []
+def build_gem_message(g):
+    tier_icon = {"S-TIER":"[S]","A-TIER":"[A]","B-TIER":"[B]","WATCH":"[W]"}.get(g["tier"],"[?]")
+    score_bar = "#" * round(g["final_score"]/10) + "-" * (10 - round(g["final_score"]/10))
+    signals_text  = "\n".join(["  [+] " + s for s in g["signals"]])
+    warnings_text = "\n".join(["  [!] " + w for w in g["warnings"]]) if g["warnings"] else "  None"
 
-# ── Full Analysis ─────────────────────────────────────────────────────────────
-def analyze_token(pair):
-    chain_id = pair.get("chainId", "")
-    token_addr = (pair.get("baseToken") or {}).get("address", "")
+    chg_arrow = "UP" if g["chg_24h"] >= 0 else "DOWN"
+    btc_arrow = "UP" if g["btc_chg"] >= 0 else "DOWN"
 
-    # Age filter — max 24h
-    created = pair.get("pairCreatedAt")
-    if created:
-        age_hours = (time.time() * 1000 - created) / 3600000
-        if age_hours > 24:
-            return None
-
-    # Liquidity filter
-    liq = (pair.get("liquidity") or {}).get("usd") or 0
-    if liq < 20000:
-        return None
-
-    # Get rugcheck data for Solana tokens
-    rug_data = None
-    if chain_id == "solana" and token_addr:
-        rug_data = check_rugcheck(token_addr)
-        time.sleep(0.3)
-
-    # Run all scoring
-    safety_score, safety_warnings = get_safety_score(pair, rug_data)
-    if safety_score == 0:
-        return None  # Hard reject
-
-    momentum_score, momentum_signals, bs_ratio = get_momentum_score(pair)
-    smart_score, smart_signals = get_smart_money_score(pair)
-    liq_score = get_liquidity_score(pair)
-
-    # Community score (basic proxy)
-    community_score = 50  # baseline
-
-    # Weighted total opportunity score
-    opp_score = int(
-        safety_score    * 0.30 +
-        smart_score     * 0.30 +
-        momentum_score  * 0.20 +
-        community_score * 0.10 +
-        liq_score       * 0.10
-    )
-
-    risk_score = get_risk_score(pair, rug_data, safety_score)
-    tier, tier_label = get_conviction_tier(opp_score, risk_score)
-
-    if tier == "REJECT":
-        return None
-
-    mcap = pair.get("marketCap") or pair.get("fdv") or 0
-    symbol = (pair.get("baseToken") or {}).get("symbol", "???").upper()
-    name = (pair.get("baseToken") or {}).get("name", "")
-    pair_addr = pair.get("pairAddress","")
-    url = pair.get("url") or "https://dexscreener.com/%s/%s" % (chain_id, pair_addr)
-    vol_h24 = (pair.get("volume") or {}).get("h24") or 0
-    chg_h24 = (pair.get("priceChange") or {}).get("h24") or 0
-    chg_h1  = (pair.get("priceChange") or {}).get("h1") or 0
-
-    txns = (pair.get("txns") or {})
-    buys  = (txns.get("h24") or {}).get("buys", 0)
-    sells = (txns.get("h24") or {}).get("sells", 0)
-
-    holders_est = buys  # proxy
-
-    return {
-        "symbol": symbol,
-        "name": name,
-        "chain": chain_id.upper(),
-        "pair_addr": pair_addr,
-        "token_addr": token_addr,
-        "age": fmt_age(pair),
-        "mcap": mcap,
-        "liquidity": liq,
-        "volume": vol_h24,
-        "chg_h24": chg_h24,
-        "chg_h1": chg_h1,
-        "buys": buys,
-        "sells": sells,
-        "bs_ratio": bs_ratio,
-        "holders_est": holders_est,
-        "safety_score": safety_score,
-        "smart_score": smart_score,
-        "momentum_score": momentum_score,
-        "liq_score": liq_score,
-        "community_score": community_score,
-        "opp_score": opp_score,
-        "risk_score": risk_score,
-        "risk_label": risk_label(risk_score),
-        "tier": tier,
-        "tier_label": tier_label,
-        "url": url,
-        "safety_warnings": safety_warnings,
-        "momentum_signals": momentum_signals,
-        "smart_signals": smart_signals,
-    }
-
-# ── Build Alert Message ───────────────────────────────────────────────────────
-def build_message(t):
-    tier_icon = {"S-TIER":"[S]","A-TIER":"[A]","B-TIER":"[B]","C-TIER":"[C]"}.get(t["tier"],"[?]")
-    chg_arrow_h24 = "+" if t["chg_h24"] >= 0 else ""
-    chg_arrow_h1  = "+" if t["chg_h1"] >= 0 else ""
-
-    opp_bar = "#" * round(t["opp_score"]/10) + "-" * (10 - round(t["opp_score"]/10))
-    risk_bar = "#" * round(t["risk_score"]/10) + "-" * (10 - round(t["risk_score"]/10))
-
-    momentum_text = "\n".join(["  + " + s for s in t["momentum_signals"][:3]]) or "  None"
-    smart_text = "\n".join(["  + " + s for s in t["smart_signals"][:2]]) or "  None"
-    warning_text = "\n".join(["  ! " + w for w in t["safety_warnings"][:2]]) if t["safety_warnings"] else "  None"
+    catapult_line = "\n  [*] %s" % g["catapult_note"] if g["catapult_note"] else ""
 
     return (
-        "%s %s ALERT - %s\n"
+        "%s GEM ALERT - %s\n"
         "==================================================\n"
-        "Token:     $%s (%s)\n"
-        "Chain:     %s\n"
-        "Age:       %s\n"
+        "Token:   $%s (%s)\n"
+        "Chain:   %s\n"
+        "Age:     %s\n"
         "\n"
-        "-- MARKET DATA --\n"
-        "Market Cap:  %s\n"
-        "Liquidity:   %s\n"
-        "Volume 24h:  %s\n"
-        "24h Change:  %s%.1f%%\n"
-        "1h Change:   %s%.1f%%\n"
-        "Buys/Sells:  %d / %d (%.1fx ratio)\n"
+        "=== GEM SCORE ===\n"
+        "Overall:  %d/100  [%s]\n"
+        "Tier:     %s\n"
+        "Momentum: %d/100\n"
+        "Safety:   %d/100\n"
+        "Context:  %d/50\n"
+        "Rugcheck: %d/100\n"
         "\n"
-        "-- SCORES --\n"
-        "Opportunity: %d/100  [%s]\n"
-        "Risk:        %d/100  [%s]\n"
-        "Safety:      %d/100\n"
-        "Smart Money: %d/100\n"
-        "Momentum:    %d/100\n"
-        "Liquidity:   %d/100\n"
+        "=== MARKET DATA ===\n"
+        "Price:      $%s\n"
+        "Market Cap: %s\n"
+        "Liquidity:  %s\n"
+        "Volume 24h: %s\n"
+        "24h Change: %s %+.1f%%\n"
+        "Buy/Sell:   %.1fx ratio\n"
         "\n"
-        "-- MOMENTUM SIGNALS --\n"
+        "=== WHY THIS GEM ===\n"
+        "%s%s\n"
+        "\n"
+        "=== SAFETY NOTES ===\n"
         "%s\n"
         "\n"
-        "-- SMART MONEY --\n"
-        "%s\n"
+        "=== MACRO CONTEXT ===\n"
+        "Fear/Greed: %d (%s)\n"
+        "BTC 24h:    %s %+.1f%%\n"
         "\n"
-        "-- SAFETY NOTES --\n"
-        "%s\n"
-        "\n"
-        "-- CONVICTION --\n"
-        "Tier:      %s - %s\n"
-        "Risk:      %s\n"
+        "=== RISK MANAGEMENT ===\n"
+        "- Only invest what you can afford to lose\n"
+        "- Take partial profits early (50%% at 2-3x)\n"
+        "- Set a mental stop loss\n"
+        "- Never go all-in on one gem\n"
         "\n"
         "Chart: %s\n"
+        "Signal: %s UTC\n"
         "==================================================\n"
-        "Not financial advice - DYOR. High risk asset."
+        "Not financial advice - DYOR. Memecoins = HIGH RISK"
     ) % (
-        tier_icon, t["tier"], t["tier_label"],
-        t["symbol"], t["name"],
-        t["chain"],
-        t["age"],
-        fmt_usd(t["mcap"]),
-        fmt_usd(t["liquidity"]),
-        fmt_usd(t["volume"]),
-        chg_arrow_h24, t["chg_h24"],
-        chg_arrow_h1, t["chg_h1"],
-        t["buys"], t["sells"], t["bs_ratio"],
-        t["opp_score"], opp_bar,
-        t["risk_score"], risk_bar,
-        t["safety_score"],
-        t["smart_score"],
-        t["momentum_score"],
-        t["liq_score"],
-        momentum_text,
-        smart_text,
-        warning_text,
-        t["tier"], t["tier_label"],
-        t["risk_label"],
-        t["url"]
+        tier_icon, g["tier"],
+        g["symbol"], g["name"],
+        chain_label(g["chain"]),
+        fmt_age(g["age_mins"]),
+        g["final_score"], score_bar,
+        g["tier"],
+        g["mom_score"], g["saf_score"],
+        g["ctx_score"], g["rug_score"],
+        ("%.8f" % g["price"]).rstrip("0").rstrip(".") if g["price"] < 0.01 else "%.4f" % g["price"],
+        fmt_usd(g["mcap"]),
+        fmt_usd(g["liq"]),
+        fmt_usd(g["vol_24h"]),
+        chg_arrow, g["chg_24h"],
+        g["bs_ratio"],
+        signals_text, catapult_line,
+        warnings_text,
+        g["fear_greed"], fg_label(g["fear_greed"]),
+        btc_arrow, g["btc_chg"],
+        g["url"],
+        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
     )
 
-# ── Scanner ───────────────────────────────────────────────────────────────────
-def scan(seen_pairs):
-    results = []
+# ════════════════════════════════════════════════════════════════════════════
+# SCANNER
+# ════════════════════════════════════════════════════════════════════════════
 
-    # Scan boosted tokens
-    boosted = fetch_boosted()
-    log.info("Analyzing %d boosted tokens..." % len(boosted[:20]))
+def run_scan(seen_pairs, ctx):
+    gems = []
+
+    # 1. DexScreener boosted tokens
+    boosted = fetch_boosted_tokens()
     for t in boosted[:20]:
-        pairs = fetch_pairs(t["chainId"], t["tokenAddress"])
+        pairs = fetch_token_pairs(t.get("chainId",""), t.get("tokenAddress",""))
         if pairs:
             best = max(pairs, key=lambda p: (p.get("volume") or {}).get("h24") or 0)
             addr = best.get("pairAddress","")
             if addr and addr not in seen_pairs:
                 seen_pairs.add(addr)
-                result = analyze_token(best)
-                if result and result["opp_score"] >= MIN_OPPORTUNITY_SCORE and result["risk_score"] <= MAX_RISK_SCORE:
-                    results.append(result)
-        time.sleep(0.5)
+                result = analyze_gem(best, ctx)
+                if result: gems.append(result)
+        time.sleep(0.4)
 
-    # Scan new pairs on each chain
-    for chain in CHAINS:
-        new_pairs = fetch_new_pairs(chain)
-        for pair in new_pairs:
+    # 2. New pairs on each EVM/Solana chain
+    for chain in ["solana", "ethereum", "base", "bsc"]:
+        pairs = fetch_new_pairs_chain(chain)
+        for pair in pairs:
             addr = pair.get("pairAddress","")
             if addr and addr not in seen_pairs:
                 seen_pairs.add(addr)
-                result = analyze_token(pair)
-                if result and result["opp_score"] >= MIN_OPPORTUNITY_SCORE and result["risk_score"] <= MAX_RISK_SCORE:
-                    results.append(result)
+                result = analyze_gem(pair, ctx)
+                if result: gems.append(result)
         time.sleep(0.5)
 
-    # Sort by opportunity score
-    results.sort(key=lambda x: x["opp_score"], reverse=True)
-    return results
+    # 3. HyperEVM / Catapult tokens
+    hl_tokens = fetch_hl_spot_tokens()
+    for ht in hl_tokens:
+        key = "hl_%s" % ht.get("name","")
+        if key not in seen_pairs:
+            seen_pairs.add(key)
+            result = analyze_gem(ht, ctx)
+            if result: gems.append(result)
+    time.sleep(0.5)
 
-# ── Main Loop ─────────────────────────────────────────────────────────────────
+    # Sort by score
+    gems.sort(key=lambda g: g["final_score"], reverse=True)
+    return gems
+
+# ════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ════════════════════════════════════════════════════════════════════════════
+
 async def main():
-    log.info("Advanced GemFinder Bot starting...")
+    log.info("Advanced GemFinder Bot v2 starting...")
     bot = Bot(token=TELEGRAM_TOKEN)
 
-    startup_msg = (
-        "Advanced GemFinder Bot Online!\n\n"
-        "Scanning: Solana, Ethereum, Base, BSC\n"
-        "Min Opportunity Score: %d/100\n"
-        "Max Risk Score: %d/100\n"
-        "Scan Interval: %ds\n\n"
-        "Conviction Tiers:\n"
-        "[S] S-TIER: Score 85+ Risk under 25\n"
-        "[A] A-TIER: Score 75+ Risk under 35\n"
-        "[B] B-TIER: Score 60+ Risk under 40\n\n"
-        "Alerts will include full analysis!\n"
-        "Not financial advice - DYOR"
-    ) % (MIN_OPPORTUNITY_SCORE, MAX_RISK_SCORE, SCAN_INTERVAL)
+    await bot.send_message(
+        chat_id=CHAT_ID,
+        text=(
+            "Advanced GemFinder Bot v2 Online!\n\n"
+            "Scanning 5 chains simultaneously:\n"
+            "  Solana  Ethereum  Base  BSC  HyperEVM\n\n"
+            "Data sources:\n"
+            "  DexScreener (boosted + new pairs)\n"
+            "  Hyperliquid API (HyperEVM/Catapult)\n"
+            "  Rugcheck (Solana safety)\n"
+            "  Fear & Greed Index\n"
+            "  BTC macro correlation\n\n"
+            "Gem scoring:\n"
+            "  Momentum (45%%) - vol, buys, price\n"
+            "  Safety   (30%%) - rugcheck, liquidity\n"
+            "  Context  (15%%) - BTC, fear/greed\n"
+            "  Catapult (10%%) - HyperEVM bonus\n\n"
+            "Min Score:     %d/100\n"
+            "Max MCap:      %s\n"
+            "Min Liquidity: %s\n"
+            "Scan Interval: %ds\n\n"
+            "S-TIER = score 88+\n"
+            "A-TIER = score 80-87\n"
+            "B-TIER = score 72-79\n\n"
+            "Not financial advice - DYOR!"
+        ) % (GEM_THRESHOLD, fmt_usd(MAX_MCAP), fmt_usd(MIN_LIQUIDITY), SCAN_INTERVAL)
+    )
 
-    await bot.send_message(chat_id=CHAT_ID, text=startup_msg)
-
-    seen_pairs = set()
-    scan_count = 0
+    seen_pairs  = set()
+    signal_times = {}
+    scan_count  = 0
 
     while True:
         scan_count += 1
         log.info("Scan #%d starting..." % scan_count)
 
         try:
-            gems = scan(seen_pairs)
-            log.info("Scan #%d complete. Found %d qualifying gems." % (scan_count, len(gems)))
+            ctx = fetch_market_context()
+            log.info("Market: FGI=%d BTC=%+.1f%%" % (ctx["fear_greed"], ctx["btc_chg"]))
+
+            gems = run_scan(seen_pairs, ctx)
+            log.info("Scan #%d done. Found %d gems." % (scan_count, len(gems)))
 
             for gem in gems:
-                msg = build_message(gem)
+                key = gem["pair_addr"]
+                last_sent = signal_times.get(key, 0)
+                if time.time() - last_sent < SIGNAL_COOLDOWN:
+                    continue
+
+                msg = build_gem_message(gem)
                 try:
                     await bot.send_message(
                         chat_id=CHAT_ID,
                         text=msg,
                         disable_web_page_preview=True
                     )
-                    log.info("Alert sent: $%s %s score=%d risk=%d" % (
-                        gem["symbol"], gem["tier"], gem["opp_score"], gem["risk_score"]
+                    signal_times[key] = time.time()
+                    log.info("Sent: $%s %s score=%d chain=%s" % (
+                        gem["symbol"], gem["tier"],
+                        gem["final_score"], gem["chain"]
                     ))
                     await asyncio.sleep(2)
                 except Exception as e:
                     log.error("Send error: %s" % e)
-
-            if not gems:
-                log.info("No qualifying gems this scan.")
 
         except Exception as e:
             log.error("Scan error: %s" % e)
