@@ -5,8 +5,8 @@ import asyncio
 from telegram import Bot
 
 # ── Config ────────────────────────────────────────────────────────────────────
-TELEGRAM_TOKEN = "YOUR_BOT_TOKEN_HERE"
-CHAT_ID = "YOUR_CHAT_ID_HERE"
+TELEGRAM_TOKEN = "8829673667:AAHA12D1jwgyKZFz6AcuBrwfQHBMpwIaZfQ"
+CHAT_ID = "6503316066E"
 
 SCAN_INTERVAL = 120
 MIN_OPPORTUNITY_SCORE = 75
