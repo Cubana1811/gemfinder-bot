@@ -851,6 +851,9 @@ async def main():
                 try:
                     msg = build_message(gem)
                     await bot.send_message(chat_id=CHAT_ID, text=msg, disable_web_page_preview=True)
+                    if gem.get("source") == "pump.fun": verify_msg = ("🔎 PUMP.FUN VERIFICATION CHECK\n%s — rug_score=%d saf_score=%d\nMint: %s\nManually verify on rugcheck.xyz or Birdeye before trusting this score." % (gem["symbol"], gem["rug_score"], gem["saf_score"], gem["pair_addr"]))
+                if gem.get("source") == "pump.fun": await bot.send_message(chat_id=CHAT_ID, text=verify_msg, disable_web_page_preview=True)
+
                     signal_times[key] = time.time()
                     log.info("Sent: $%s %s score=%d source=%s" % (
                         gem["symbol"], gem["tier"], gem["final_score"], gem["source"]))
