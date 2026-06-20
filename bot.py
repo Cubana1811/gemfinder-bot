@@ -550,18 +550,28 @@ def analyze_dex_pair(pair, ctx):
     }
 
 def analyze_pump_coin(coin, ctx):
-    mc   = coin.get("mcap",0)
-    vol  = coin.get("vol_24h",0)
-    mint = coin.get("mint","")
+    mc   = coin.get("mcap", 0)
+    vol  = coin.get("vol_24h", 0)
+    mint = coin.get("mint", "")
 
     if mc > MAX_MCAP and mc > 0: return None
+
+    # --- Real rugcheck (was hardcoded 70,70 before) ---
+    rug_score, rug_risks = 100, []
+    if mint:
+        rug_score, rug_risks = rugcheck(mint, chain="solana")
+        time.sleep(0.25)
+        if rug_score == 0:
+            return None  # hard reject — matches DEX-pair behavior
 
     score, signals = score_pump_token(coin, ctx)
     if score < GEM_THRESHOLD: return None
 
-    if score >= 85:   tier = "S-TIER"
-    elif score >= 75: tier = "A-TIER"
-    else:             tier = "B-TIER"
+    saf_score = rug_score  # no separate insider penalty available here yet
+
+    if score >= 85:    tier = "S-TIER"
+    elif score >= 75:  tier = "A-TIER"
+    else:               tier = "B-TIER"
 
     url = "https://pump.fun/%s" % mint if mint else "https://pump.fun"
     graduating = coin.get("graduating", False)
@@ -571,16 +581,15 @@ def analyze_pump_coin(coin, ctx):
         "name": coin.get("name",""),
         "chain": "solana", "mcap": mc, "liq": 0, "vol_24h": vol,
         "chg_24h": 0, "price": 0, "age_mins": 0,
-        "bs_ratio": 0, "rug_score": 70,
-        "mom_score": score, "saf_score": 70,
+        "bs_ratio": 0, "rug_score": rug_score,
+        "mom_score": score, "saf_score": saf_score,
         "whale_score": 0, "final_score": score, "tier": tier,
-        "signals": signals, "warnings": [],
+        "signals": signals, "warnings": rug_risks[:3],
         "cat_note": "GRADUATING to Raydium!" if graduating else "Pump.fun token",
         "pair_addr": mint, "url": url,
         "fear_greed": ctx.get("fear_greed",50), "btc_chg": ctx.get("btc_chg",0),
         "source": "pump.fun", "type": "pump",
     }
-
 def analyze_hl_token(ht, ctx):
     vol   = ht.get("vol_24h",0)
     chg   = ht.get("chg_24h",0)
