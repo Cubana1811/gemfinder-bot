@@ -743,7 +743,7 @@ def run_scan(seen, ctx):
     gems = []
 
     # 1. DexScreener boosted
-   boosted = fetch_boosted()[:20]
+    boosted = fetch_boosted()[:20]
     log.info("fetch_boosted returned %d items" % len(boosted))
     for t in boosted:
         pairs = fetch_token_pairs(t.get("chainId",""), t.get("tokenAddress",""))
