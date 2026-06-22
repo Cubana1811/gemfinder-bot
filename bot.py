@@ -743,7 +743,9 @@ def run_scan(seen, ctx):
     gems = []
 
     # 1. DexScreener boosted
-    for t in fetch_boosted()[:20]:
+   boosted = fetch_boosted()[:20]
+        log.info("fetch_boosted returned %d items" % len(boosted))
+    for t in boosted:
         pairs = fetch_token_pairs(t.get("chainId",""), t.get("tokenAddress",""))
         if pairs:
             best = max(pairs, key=lambda p: (p.get("volume") or {}).get("h24") or 0)
