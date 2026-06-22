@@ -5,7 +5,7 @@ import requests
 import asyncio
 from telegram import Bot
 from datetime import datetime, timezone
-# trigger redeploy
+# trigger redeploy 2
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
