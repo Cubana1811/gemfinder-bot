@@ -10,3 +10,4 @@ correlation_filter: python correlation_filter.py
 risk_calculator: python risk_calculator.py
 dca_bot: python dca_bot.py
 performance_dashboard: python performance_dashboard.py
+macro_calendar: python macro_calendar.py
