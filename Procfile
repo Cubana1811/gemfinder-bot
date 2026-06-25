@@ -8,3 +8,4 @@ portfolio_tracker: python portfolio_tracker.py
 market_regime: python market_regime.py
 correlation_filter: python correlation_filter.py
 risk_calculator: python risk_calculator.py
+dca_bot: python dca_bot.py
