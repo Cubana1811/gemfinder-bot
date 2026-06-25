@@ -1,7 +1,7 @@
 """
 Portfolio Tracker — interactive Telegram bot for tracking open trades.
 
-Commands:
+Commands (send these to your bot in Telegram):
   /add SYMBOL DIRECTION ENTRY SL TP1 [TP2] [SIZE_USD]
       e.g. /add BTCUSDT LONG 65000 63000 70000 72000 100
   /portfolio   — show all open positions with live P&L
@@ -22,14 +22,14 @@ import logging
 import requests
 import asyncio
 from datetime import datetime, timezone
-from telegram import Bot, Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Bot
 
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHAT_ID          = os.environ.get("CHAT_ID", "YOUR_CHAT_ID_HERE")
 BINANCE_BASE     = "https://fapi.binance.com"
 PORTFOLIO_FILE   = "portfolio.json"
 ALERT_COOLDOWN   = 3600    # 1 hour between same alert per symbol
+POLL_INTERVAL    = 2       # seconds between update polls
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
@@ -70,31 +70,35 @@ def fp(n):
 
 # ── Command handlers ──────────────────────────────────────────────────────────
 
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "PORTFOLIO TRACKER — COMMANDS\n\n"
-        "/add SYMBOL DIRECTION ENTRY SL TP1 [TP2] [SIZE]\n"
-        "  Example:\n"
-        "  /add BTCUSDT LONG 65000 63000 70000 74000 100\n"
-        "  (SIZE = USD amount in trade, optional)\n\n"
-        "/portfolio\n"
-        "  Show all open positions with live P&L\n\n"
-        "/close SYMBOL\n"
-        "  Remove a position (mark as closed)\n"
-        "  Example: /close BTCUSDT\n\n"
-        "/pnl\n"
-        "  Quick profit/loss summary\n\n"
-        "Auto-alerts when:\n"
-        "  - Price within 1%% of your TP or SL\n"
-        "  - Reminder to move SL after TP1 hit"
+async def handle_help(bot, chat_id):
+    await bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "PORTFOLIO TRACKER — COMMANDS\n\n"
+            "/add SYMBOL DIRECTION ENTRY SL TP1 [TP2] [SIZE]\n"
+            "  Example:\n"
+            "  /add BTCUSDT LONG 65000 63000 70000 74000 100\n"
+            "  (SIZE = USD amount in trade, optional)\n\n"
+            "/portfolio\n"
+            "  Show all open positions with live P&L\n\n"
+            "/close SYMBOL\n"
+            "  Remove a position\n"
+            "  Example: /close BTCUSDT\n\n"
+            "/pnl\n"
+            "  Quick profit/loss summary\n\n"
+            "Auto-alerts when price is within\n"
+            "1%% of your TP or SL."
+        )
     )
 
-async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
+async def handle_add(bot, chat_id, args):
     if len(args) < 5:
-        await update.message.reply_text(
-            "Usage: /add SYMBOL DIRECTION ENTRY SL TP1 [TP2] [SIZE_USD]\n"
-            "Example: /add BTCUSDT LONG 65000 63000 70000 74000 100"
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "Usage: /add SYMBOL DIRECTION ENTRY SL TP1 [TP2] [SIZE_USD]\n"
+                "Example: /add BTCUSDT LONG 65000 63000 70000 74000 100"
+            )
         )
         return
 
@@ -108,7 +112,8 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         size_usd  = float(args[6]) if len(args) > 6 else 0.0
 
         if direction not in ("LONG", "SHORT"):
-            await update.message.reply_text("Direction must be LONG or SHORT.")
+            await bot.send_message(chat_id=chat_id,
+                                   text="Direction must be LONG or SHORT.")
             return
 
         if not symbol.endswith("USDT"):
@@ -154,27 +159,32 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rr,
             "Size:   $%.2f\n" % size_usd if size_usd > 0 else "",
         )
-        await update.message.reply_text(msg)
+        await bot.send_message(chat_id=chat_id, text=msg)
         log.info("Position added: %s %s @ %s" % (direction, symbol, entry))
 
-    except ValueError:
-        await update.message.reply_text(
-            "Invalid numbers. Example:\n"
-            "/add BTCUSDT LONG 65000 63000 70000"
+    except (ValueError, IndexError):
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "Invalid numbers. Example:\n"
+                "/add BTCUSDT LONG 65000 63000 70000"
+            )
         )
 
-async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_portfolio(bot, chat_id):
     portfolio = load_portfolio()
     if not portfolio:
-        await update.message.reply_text(
-            "No open positions.\n"
-            "Add one with /add SYMBOL DIRECTION ENTRY SL TP1"
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "No open positions.\n"
+                "Add one with:\n"
+                "/add SYMBOL DIRECTION ENTRY SL TP1"
+            )
         )
         return
 
     lines = ["OPEN POSITIONS\n"]
-    total_pnl_pct = 0
-    count = 0
 
     for symbol, t in portfolio.items():
         price = get_price(symbol)
@@ -183,54 +193,47 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
 
         entry = t["entry"]
-        if t["direction"] == "LONG":
-            pnl_pct = (price - entry) / entry * 100
-        else:
-            pnl_pct = (entry - price) / entry * 100
-
-        pnl_usd = (t["size_usd"] * pnl_pct / 100) if t["size_usd"] > 0 else 0
-        sl_dist  = abs(price - t["sl"])   / price * 100
-        tp1_dist = abs(price - t["tp1"])  / price * 100
-
-        status = "IN PROFIT" if pnl_pct > 0 else "IN LOSS"
-        pnl_sign = "+" if pnl_pct >= 0 else ""
+        pnl_pct = (
+            (price - entry) / entry * 100 if t["direction"] == "LONG"
+            else (entry - price) / entry * 100
+        )
+        pnl_usd  = (t["size_usd"] * pnl_pct / 100) if t["size_usd"] > 0 else 0
+        sl_dist  = abs(price - t["sl"])  / price * 100
+        tp1_dist = abs(price - t["tp1"]) / price * 100
+        status   = "IN PROFIT" if pnl_pct > 0 else "IN LOSS"
 
         line = (
             "%s %s\n"
             "  Entry: $%s  Now: $%s\n"
-            "  P&L:   %s%.2f%%"
+            "  P&L:   %+.2f%%%s\n"
+            "  SL: %.2f%% away  TP1: %.2f%% away\n"
+            "  [%s]\n"
         ) % (
             t["direction"], symbol.replace("USDT", ""),
             fp(entry), fp(price),
-            pnl_sign, pnl_pct,
+            pnl_pct,
+            "  ($%+.2f)" % pnl_usd if pnl_usd != 0 else "",
+            sl_dist, tp1_dist,
+            status,
         )
-        if pnl_usd != 0:
-            line += "  ($%s%.2f)" % ("+" if pnl_usd >= 0 else "", pnl_usd)
-        line += "\n"
-        line += "  SL: %.2f%% away  |  TP1: %.2f%% away\n" % (sl_dist, tp1_dist)
-        line += "  [%s]\n" % status
-
         lines.append(line)
-        total_pnl_pct += pnl_pct
-        count += 1
 
-    if count > 1:
-        lines.append("Total open positions: %d" % count)
+    await bot.send_message(chat_id=chat_id, text="\n".join(lines))
 
-    await update.message.reply_text("\n".join(lines))
-
-async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /close SYMBOL\nExample: /close BTCUSDT")
+async def handle_close(bot, chat_id, args):
+    if not args:
+        await bot.send_message(chat_id=chat_id,
+                               text="Usage: /close SYMBOL\nExample: /close BTCUSDT")
         return
 
-    symbol    = context.args[0].upper()
+    symbol = args[0].upper()
     if not symbol.endswith("USDT"):
         symbol = symbol + "USDT"
 
     portfolio = load_portfolio()
     if symbol not in portfolio:
-        await update.message.reply_text("%s not found in portfolio." % symbol)
+        await bot.send_message(chat_id=chat_id,
+                               text="%s not found in your portfolio." % symbol)
         return
 
     t     = portfolio[symbol]
@@ -238,69 +241,82 @@ async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
     entry = t["entry"]
 
     if price > 0:
-        if t["direction"] == "LONG":
-            pnl_pct = (price - entry) / entry * 100
-        else:
-            pnl_pct = (entry - price) / entry * 100
+        pnl_pct = (
+            (price - entry) / entry * 100 if t["direction"] == "LONG"
+            else (entry - price) / entry * 100
+        )
         pnl_usd = (t["size_usd"] * pnl_pct / 100) if t["size_usd"] > 0 else 0
-        result_msg = "Closed at $%s  |  P&L: %+.2f%%%s" % (
+        result  = "Closed at $%s  P&L: %+.2f%%%s" % (
             fp(price), pnl_pct,
             "  ($%+.2f)" % pnl_usd if pnl_usd != 0 else ""
         )
     else:
-        result_msg = "Closed."
+        result = "Closed."
 
     del portfolio[symbol]
     save_portfolio(portfolio)
-    await update.message.reply_text(
-        "Position closed: %s %s\n%s" % (t["direction"], symbol.replace("USDT", ""), result_msg)
+    await bot.send_message(
+        chat_id=chat_id,
+        text="Position closed: %s %s\n%s" % (
+            t["direction"], symbol.replace("USDT", ""), result)
     )
-    log.info("Position closed: %s" % symbol)
 
-async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_pnl(bot, chat_id):
     portfolio = load_portfolio()
     if not portfolio:
-        await update.message.reply_text("No open positions.")
+        await bot.send_message(chat_id=chat_id, text="No open positions.")
         return
 
-    winners = []
-    losers  = []
-    flat    = []
+    winners, losers, flat = [], [], []
 
     for symbol, t in portfolio.items():
         price = get_price(symbol)
         if price == 0:
             continue
-        if t["direction"] == "LONG":
-            pnl_pct = (price - t["entry"]) / t["entry"] * 100
-        else:
-            pnl_pct = (t["entry"] - price) / t["entry"] * 100
-
+        pnl_pct = (
+            (price - t["entry"]) / t["entry"] * 100 if t["direction"] == "LONG"
+            else (t["entry"] - price) / t["entry"] * 100
+        )
         label = "%s %s: %+.2f%%" % (
             t["direction"], symbol.replace("USDT", ""), pnl_pct)
-        if pnl_pct > 0.5:
-            winners.append(label)
-        elif pnl_pct < -0.5:
-            losers.append(label)
-        else:
-            flat.append(label)
+        if pnl_pct > 0.5:   winners.append(label)
+        elif pnl_pct < -0.5: losers.append(label)
+        else:                flat.append(label)
 
     msg = "QUICK P&L SUMMARY\n\n"
-    if winners:
-        msg += "In Profit:\n" + "\n".join("  " + w for w in winners) + "\n\n"
-    if losers:
-        msg += "In Loss:\n"   + "\n".join("  " + l for l in losers)  + "\n\n"
-    if flat:
-        msg += "Flat:\n"      + "\n".join("  " + f for f in flat)    + "\n\n"
+    if winners: msg += "In Profit:\n"  + "\n".join("  " + w for w in winners) + "\n\n"
+    if losers:  msg += "In Loss:\n"    + "\n".join("  " + l for l in losers)  + "\n\n"
+    if flat:    msg += "Flat:\n"       + "\n".join("  " + f for f in flat)    + "\n\n"
     if not winners and not losers and not flat:
-        msg += "Could not fetch prices."
+        msg += "Could not fetch prices right now."
 
-    await update.message.reply_text(msg)
+    await bot.send_message(chat_id=chat_id, text=msg)
+
+# ── Command dispatcher ────────────────────────────────────────────────────────
+
+async def dispatch(bot, message):
+    text = (message.get("text") or "").strip()
+    if not text.startswith("/"):
+        return
+    chat_id = message["chat"]["id"]
+    parts   = text.split()
+    cmd     = parts[0].lower().split("@")[0]
+    args    = parts[1:]
+
+    if cmd == "/help":
+        await handle_help(bot, chat_id)
+    elif cmd == "/add":
+        await handle_add(bot, chat_id, args)
+    elif cmd == "/portfolio":
+        await handle_portfolio(bot, chat_id)
+    elif cmd == "/close":
+        await handle_close(bot, chat_id, args)
+    elif cmd == "/pnl":
+        await handle_pnl(bot, chat_id)
 
 # ── Background price monitor ──────────────────────────────────────────────────
 
 async def price_monitor(bot):
-    """Check all positions every 5 minutes and send proximity alerts."""
     while True:
         await asyncio.sleep(300)
         portfolio = load_portfolio()
@@ -311,14 +327,12 @@ async def price_monitor(bot):
             price = get_price(symbol)
             if price == 0:
                 continue
-
             now = time.time()
 
-            # Alert: price within 1% of SL
-            sl_dist_pct = abs(price - t["sl"]) / price * 100
-            sl_key      = "sl_%s" % symbol
-            last_sl_alert = t["sl_alerts"].get(sl_key, 0)
-            if sl_dist_pct < 1.0 and now - last_sl_alert > ALERT_COOLDOWN:
+            # SL approaching
+            sl_dist = abs(price - t["sl"]) / price * 100
+            sl_key  = "sl_%s" % symbol
+            if sl_dist < 1.0 and now - t["sl_alerts"].get(sl_key, 0) > ALERT_COOLDOWN:
                 try:
                     await bot.send_message(
                         chat_id=CHAT_ID,
@@ -326,23 +340,19 @@ async def price_monitor(bot):
                             "SL APPROACHING — %s %s\n\n"
                             "Current: $%s\n"
                             "SL:      $%s  (%.2f%% away)\n\n"
-                            "Consider your position — SL is very close."
-                        ) % (
-                            t["direction"], symbol.replace("USDT", ""),
-                            fp(price), fp(t["sl"]), sl_dist_pct
-                        )
+                            "SL is very close — review your position."
+                        ) % (t["direction"], symbol.replace("USDT", ""),
+                             fp(price), fp(t["sl"]), sl_dist)
                     )
                     portfolio[symbol]["sl_alerts"][sl_key] = now
                     save_portfolio(portfolio)
-                    log.info("SL alert: %s" % symbol)
                 except Exception as e:
-                    log.error("SL alert error: %s" % e)
+                    log.error("SL alert: %s" % e)
 
-            # Alert: price within 1% of TP1
-            tp1_dist_pct = abs(price - t["tp1"]) / price * 100
-            tp1_key      = "tp1_%s" % symbol
-            last_tp_alert = t["tp_alerts"].get(tp1_key, 0)
-            if tp1_dist_pct < 1.0 and now - last_tp_alert > ALERT_COOLDOWN:
+            # TP1 approaching
+            tp1_dist = abs(price - t["tp1"]) / price * 100
+            tp1_key  = "tp1_%s" % symbol
+            if tp1_dist < 1.0 and now - t["tp_alerts"].get(tp1_key, 0) > ALERT_COOLDOWN:
                 try:
                     await bot.send_message(
                         chat_id=CHAT_ID,
@@ -351,49 +361,46 @@ async def price_monitor(bot):
                             "Current: $%s\n"
                             "TP1:     $%s  (%.2f%% away)\n\n"
                             "Get ready to take 40%% profit\n"
-                            "and move SL to breakeven."
-                        ) % (
-                            t["direction"], symbol.replace("USDT", ""),
-                            fp(price), fp(t["tp1"]), tp1_dist_pct
-                        )
+                            "and move SL to breakeven ($%s)."
+                        ) % (t["direction"], symbol.replace("USDT", ""),
+                             fp(price), fp(t["tp1"]), tp1_dist, fp(t["entry"]))
                     )
                     portfolio[symbol]["tp_alerts"][tp1_key] = now
                     save_portfolio(portfolio)
-                    log.info("TP1 alert: %s" % symbol)
                 except Exception as e:
-                    log.error("TP1 alert error: %s" % e)
+                    log.error("TP1 alert: %s" % e)
 
-            # Reminder: move SL to breakeven if TP1 passed
-            tp1_hit = (
+            # Move SL to breakeven reminder
+            tp1_passed = (
                 (t["direction"] == "LONG"  and price >= t["tp1"]) or
                 (t["direction"] == "SHORT" and price <= t["tp1"])
             )
-            if tp1_hit and not t.get("be_alerted"):
+            if tp1_passed and not t.get("be_alerted"):
                 try:
                     await bot.send_message(
                         chat_id=CHAT_ID,
                         text=(
                             "MOVE SL TO BREAKEVEN — %s %s\n\n"
-                            "TP1 has been passed.\n"
-                            "Move your Stop Loss to $%s (entry)\n"
-                            "to lock in a risk-free trade.\n\n"
+                            "TP1 has been passed!\n"
+                            "Move your Stop Loss to entry price:\n"
+                            "$%s\n\n"
+                            "This locks in a risk-free trade.\n"
                             "Current price: $%s"
-                        ) % (
-                            t["direction"], symbol.replace("USDT", ""),
-                            fp(t["entry"]), fp(price)
-                        )
+                        ) % (t["direction"], symbol.replace("USDT", ""),
+                             fp(t["entry"]), fp(price))
                     )
                     portfolio[symbol]["be_alerted"] = True
                     save_portfolio(portfolio)
-                    log.info("BE reminder: %s" % symbol)
                 except Exception as e:
-                    log.error("BE alert error: %s" % e)
+                    log.error("BE alert: %s" % e)
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Main loop ─────────────────────────────────────────────────────────────────
 
-async def post_init(application):
-    bot = application.bot
-    asyncio.create_task(price_monitor(bot))
+async def main():
+    log.info("Portfolio Tracker starting...")
+    bot    = Bot(token=TELEGRAM_TOKEN)
+    offset = 0
+
     await bot.send_message(
         chat_id=CHAT_ID,
         text=(
@@ -411,15 +418,25 @@ async def post_init(application):
         )
     )
 
-def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
-    app.add_handler(CommandHandler("help",      cmd_help))
-    app.add_handler(CommandHandler("add",       cmd_add))
-    app.add_handler(CommandHandler("portfolio", cmd_portfolio))
-    app.add_handler(CommandHandler("close",     cmd_close))
-    app.add_handler(CommandHandler("pnl",       cmd_pnl))
-    log.info("Portfolio Tracker polling...")
-    app.run_polling(drop_pending_updates=True)
+    # Start background price monitor
+    asyncio.create_task(price_monitor(bot))
+
+    # Manual update polling loop
+    while True:
+        try:
+            updates = await bot.get_updates(
+                offset=offset, timeout=30, allowed_updates=["message"])
+            for update in updates:
+                offset = update.update_id + 1
+                if update.message:
+                    raw = update.message.to_dict()
+                    await dispatch(bot, raw)
+        except Exception as e:
+            log.error("Poll error: %s" % e)
+            await asyncio.sleep(5)
+
+        await asyncio.sleep(POLL_INTERVAL)
+
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
