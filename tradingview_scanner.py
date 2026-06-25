@@ -309,6 +309,81 @@ def is_active_session():
     return (8 <= hour < 17) or (13 <= hour < 22)   # covers 08:00–22:00 UTC
 
 
+def candle_structure(opens, closes, required=2, window=3):
+    """
+    Returns (bull_count, bear_count) of directional closes in the last `window` candles.
+    A LONG signal needs bull_count >= required; SHORT needs bear_count >= required.
+    Entering against immediate price action (e.g. LONG while last 3 candles all red)
+    is the single biggest source of premature entries.
+    """
+    bull = sum(1 for i in range(-window, 0) if closes[i] > opens[i])
+    bear = sum(1 for i in range(-window, 0) if closes[i] < opens[i])
+    return bull, bear
+
+
+def bb_squeeze_state(closes, period=20, std_dev=2, expand_lookback=8):
+    """
+    Returns (is_expanding, bb_width_pct).
+    is_expanding = True when BBands are widening after a squeeze.
+    Entries at a BB squeeze breakout ride the full directional move;
+    entries into already-wide bands often catch the tail end.
+    """
+    if len(closes) < period + expand_lookback:
+        return False, 0.0
+
+    def bb_width(window):
+        mid = sum(window) / len(window)
+        std = (sum((x - mid) ** 2 for x in window) / len(window)) ** 0.5
+        return (std * std_dev * 2) / mid if mid > 0 else 0
+
+    widths = [bb_width(closes[-(period + expand_lookback - i):-(expand_lookback - i)])
+              for i in range(expand_lookback)]
+    widths = [w for w in widths if w > 0]
+    if len(widths) < 3:
+        return False, 0.0
+
+    current_width  = widths[-1]
+    avg_prior      = sum(widths[:-2]) / len(widths[:-2])
+    is_expanding   = current_width > avg_prior * 1.08   # 8% wider than prior avg
+    return is_expanding, round(current_width * 100, 2)
+
+
+def liquidity_sweep(highs, lows, closes, opens, sweep_window=5, ref_window=20):
+    """
+    Smart Money / ICT liquidity sweep detector.
+
+    BULLISH sweep: within the last `sweep_window` candles, a wick dipped
+    BELOW the lowest low of the prior `ref_window` candles, but the candle
+    CLOSED back above that level.  Smart money grabbed sell-side liquidity
+    (cleared stop-losses below the swing low) then drove price back up.
+
+    BEARISH sweep: wick above the highest high of prior range, closed below.
+    Smart money grabbed buy-side liquidity above the swing high.
+
+    This is the highest-conviction entry in Smart Money Concepts — you're
+    entering AFTER weak hands have been flushed out.
+    """
+    if len(closes) < ref_window + sweep_window + 2:
+        return False, False
+
+    ref_slice  = slice(-(ref_window + sweep_window), -sweep_window)
+    ref_low    = min(lows[ref_slice])
+    ref_high   = max(highs[ref_slice])
+
+    bull_sweep = False
+    bear_sweep = False
+
+    for i in range(-sweep_window, 0):
+        # Wick below prior swing low, but candle closed above it
+        if lows[i] < ref_low and closes[i] > ref_low:
+            bull_sweep = True
+        # Wick above prior swing high, but candle closed below it
+        if highs[i] > ref_high and closes[i] < ref_high:
+            bear_sweep = True
+
+    return bull_sweep, bear_sweep
+
+
 def find_sr_zones(highs, lows, closes, tolerance=0.006):
     """
     Only zones tested 3+ times are considered significant.
@@ -353,10 +428,10 @@ def market_structure(highs, lows, lookback=5):
 # SCORING ENGINE
 # ════════════════════════════════════════════════════════════════════════════════
 
-def score_setup(tv, k1h_data, k4h_data, k1d_data, market):
+def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.0):
     """
     Score a symbol using TradingView ratings + Binance candle confirmation.
-    Daily candles are used as the HTF trend filter — no counter-trend trades.
+    Daily candles used as HTF trend filter. Funding + OI gate extreme conditions.
     Returns a dict with direction, score, entry/SL/TP, and reasons.
     """
     o1h, h1h, l1h, c1h, v1h = k1h_data
@@ -410,15 +485,34 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market):
     # Use 4h S/R zones — better balance of recency and significance
     supports, resistances = find_sr_zones(h4h, l4h, c4h)
 
-    # ── HTF trend gate: reject counter-trend trades ───────────────────────────
-    # Daily EMA 200 is the definitive bull/bear dividing line
+    # ── HTF trend gate ────────────────────────────────────────────────────────
     daily_bull = price > ema200_1d if ema200_1d else None
     daily_bear = price < ema200_1d if ema200_1d else None
     if daily_bull is not None:
         if tv_rating > 0 and daily_bear:
-            return None   # trying to LONG below daily EMA 200 — counter-trend
+            return None
         if tv_rating < 0 and daily_bull:
-            return None   # trying to SHORT above daily EMA 200 — counter-trend
+            return None
+
+    # ── Funding rate gate ─────────────────────────────────────────────────────
+    # Overcrowded longs (high +funding) get squeezed; overcrowded shorts get
+    # short-squeezed.  Hard-reject signals that swim into the crowded side.
+    if tv_rating > 0 and funding > 0.05:
+        return None   # LONG into heavily-long-crowded market — squeeze risk
+    if tv_rating < 0 and funding < -0.05:
+        return None   # SHORT into heavily-short-crowded market — squeeze risk
+
+    # ── Candle structure gate ─────────────────────────────────────────────────
+    # Need 2 of last 3 × 1h candles closing in the trade direction.
+    bull_candles, bear_candles = candle_structure(o1h, c1h)
+    if tv_rating > 0 and bull_candles < 2:
+        return None   # immediate price action doesn't support LONG
+    if tv_rating < 0 and bear_candles < 2:
+        return None   # immediate price action doesn't support SHORT
+
+    # ── Pattern detectors (score bonuses) ────────────────────────────────────
+    bb_expanding, bb_width_pct = bb_squeeze_state(c1h)
+    bull_sweep, bear_sweep     = liquidity_sweep(h1h, l1h, c1h, o1h)
 
     fear_greed = market.get("fear_greed", 50)
     btc_chg    = market.get("btc_chg", 0)
@@ -540,7 +634,46 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market):
     elif fear_greed > 65:
         short_score += 4
 
-    # 9. ADX trend strength bonus (max 10)
+    # 9. Funding rate score (max 8)
+    # Slightly negative funding on a LONG = longs not crowded = no squeeze risk
+    if tv_rating > 0:
+        if -0.02 <= funding <= 0.01:
+            long_score += 8; long_reasons.append("Funding neutral %.3f%% (uncrowded long)" % funding)
+        elif funding < -0.02:
+            long_score += 5; long_reasons.append("Negative funding %.3f%% (shorts pay longs)" % funding)
+    if tv_rating < 0:
+        if -0.01 <= funding <= 0.02:
+            short_score += 8; short_reasons.append("Funding neutral %.3f%% (uncrowded short)" % funding)
+        elif funding > 0.02:
+            short_score += 5; short_reasons.append("Positive funding %.3f%% (longs pay shorts)" % funding)
+
+    # 10. Open Interest confirmation (max 10)
+    # Rising OI with price direction = real smart money entering, not just liquidations
+    if oi_chg > 5 and tv_rating > 0:
+        long_score += 10; long_reasons.append("OI rising +%.1f%% confirms long momentum" % oi_chg)
+    elif oi_chg > 2 and tv_rating > 0:
+        long_score += 5
+    elif oi_chg < -5 and tv_rating > 0:
+        long_score -= 5   # price rising on falling OI = short squeeze, not real buy
+    if oi_chg > 5 and tv_rating < 0:
+        short_score += 10; short_reasons.append("OI rising +%.1f%% confirms short momentum" % oi_chg)
+    elif oi_chg > 2 and tv_rating < 0:
+        short_score += 5
+    elif oi_chg < -5 and tv_rating < 0:
+        short_score -= 5
+
+    # 11. Bollinger Band squeeze breakout (max 12)
+    if bb_expanding:
+        long_score  += 12; long_reasons.append("BB squeeze breakout (%.2f%% width)" % bb_width_pct)
+        short_score += 12; short_reasons.append("BB squeeze breakout (%.2f%% width)" % bb_width_pct)
+
+    # 12. Liquidity sweep / Smart Money entry (max 18 — highest single bonus)
+    if bull_sweep and tv_rating > 0:
+        long_score += 18; long_reasons.append("Liquidity sweep: buy-side swept, price recovered (SMC entry)")
+    if bear_sweep and tv_rating < 0:
+        short_score += 18; short_reasons.append("Liquidity sweep: sell-side swept, price rejected (SMC entry)")
+
+    # 13. ADX trend strength bonus (max 10)
     # Gate already rejected ADX < 20 above; here we reward strong trends
     if adx4h >= 35:
         long_score  += 10; long_reasons.append("ADX %.1f — very strong trend" % adx4h)
@@ -549,14 +682,15 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market):
         long_score  += 5;  long_reasons.append("ADX %.1f — trending market" % adx4h)
         short_score += 5;  short_reasons.append("ADX %.1f — trending market" % adx4h)
 
-    # 10. BTC correlation (max 5)
+    # 14. BTC correlation (max 5)
     if btc_chg > 3:
         long_score += 5; long_reasons.append("BTC +%.1f%% macro lift" % btc_chg)
     elif btc_chg < -3:
         short_score += 5; short_reasons.append("BTC %.1f%% macro drag" % btc_chg)
 
     # ── Normalise to 100 ────────────────────────────────────────────────────────
-    max_pts = 146
+    # max_pts covers all additive branches: 35+10+10+20+15+15+15+10+10+8+10+12+18+10+5 = 203
+    max_pts = 203
     long_pct  = min(int(long_score  / max_pts * 100), 100)
     short_pct = min(int(short_score / max_pts * 100), 100)
 
@@ -671,6 +805,12 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market):
         "btc_chg":      btc_chg,
         "change_24h":   tv["change"],
         "volume_24h":   tv["volume"],
+        "funding":      funding,
+        "oi_chg":       oi_chg,
+        "bb_expanding": bb_expanding,
+        "bb_width":     bb_width_pct,
+        "bull_sweep":   bull_sweep,
+        "bear_sweep":   bear_sweep,
         "reasons":      reasons,
     }
 
@@ -756,6 +896,10 @@ def build_message(s):
         "BTC 24h:    %+.1f%%\n"
         "Pair 24h:   %+.2f%%\n"
         "Volume:     %s\n"
+        "Funding:    %.4f%%\n"
+        "OI Change:  %+.1f%%\n"
+        "%s"
+        "%s"
         "\n"
         "=== RISK RULES ===\n"
         "- Max 3-5%% of portfolio per trade\n"
@@ -793,6 +937,10 @@ def build_message(s):
         s["btc_chg"],
         s["change_24h"],
         fv(s["volume_24h"]),
+        s["funding"],
+        s["oi_chg"],
+        "BB Squeeze:  BREAKING OUT\n" if s["bb_expanding"] else "",
+        "SMC Sweep:   LIQUIDITY SWEPT - PREMIUM ENTRY\n" if (s["bull_sweep"] or s["bear_sweep"]) else "",
         datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
     )
 
@@ -824,10 +972,16 @@ async def main():
             "  - Volume spike detection\n"
             "  - Fear & Greed + BTC correlation\n\n"
             "Quality Gates:\n"
-            "  - Daily EMA 200 trend filter (no counter-trend)\n"
+            "  - Daily EMA 200 (no counter-trend)\n"
             "  - ADX > 20 (trending markets only)\n"
-            "  - London/NY session only (08:00-22:00 UTC)\n"
+            "  - Candle structure (2/3 closes confirm)\n"
+            "  - Funding rate (<0.05%% gate)\n"
+            "  - London/NY session only\n"
             "  - BTC spike pause (>2%% on 15m)\n\n"
+            "Bonus Signals:\n"
+            "  - OI confirmation (+10 pts)\n"
+            "  - BB squeeze breakout (+12 pts)\n"
+            "  - SMC liquidity sweep (+18 pts)\n\n"
             "Min Score: %d/100  |  Min R/R: %.1fx\n"
             "Scan every: %ds\n\n"
             "Not financial advice - DYOR!"
@@ -880,9 +1034,11 @@ async def main():
                     continue
 
                 try:
-                    k1h = fetch_klines(symbol, "1h",  200); time.sleep(0.15)
-                    k4h = fetch_klines(symbol, "4h",  150); time.sleep(0.15)
-                    k1d = fetch_klines(symbol, "1d",   60); time.sleep(0.15)
+                    k1h     = fetch_klines(symbol, "1h",  200); time.sleep(0.15)
+                    k4h     = fetch_klines(symbol, "4h",  150); time.sleep(0.15)
+                    k1d     = fetch_klines(symbol, "1d",   60); time.sleep(0.15)
+                    funding = fetch_funding_rate(symbol);       time.sleep(0.10)
+                    oi_chg  = fetch_oi_change(symbol);          time.sleep(0.10)
 
                     if not k1h or not k4h:
                         continue
@@ -893,6 +1049,8 @@ async def main():
                         parse_klines(k4h),
                         parse_klines(k1d) if k1d else ([], [], [], [], []),
                         market,
+                        funding=funding,
+                        oi_chg=oi_chg,
                     )
 
                     if result:
