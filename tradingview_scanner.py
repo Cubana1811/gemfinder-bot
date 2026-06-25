@@ -8,7 +8,18 @@ import asyncio
 from telegram import Bot
 from datetime import datetime, timezone
 
-TRADES_FILE = "active_trades.json"
+TRADES_FILE  = "active_trades.json"
+REGIME_FILE  = "regime.json"
+
+def load_regime():
+    """Read regime.json written by market_regime.py."""
+    if not os.path.exists(REGIME_FILE):
+        return {"regime": "BULL", "strength": "MODERATE"}
+    try:
+        with open(REGIME_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {"regime": "BULL", "strength": "MODERATE"}
 
 def save_signal_for_tracker(result):
     """Write signal to shared file so tp_tracker.py can monitor it."""
@@ -1230,6 +1241,24 @@ async def main():
         }
         log.info("Market: FGI=%d  BTC=%+.2f%%" % (market["fear_greed"], market["btc_chg"]))
 
+        # ── Regime filter ─────────────────────────────────────────────────────
+        regime_data      = load_regime()
+        regime           = regime_data.get("regime", "BULL")
+        regime_strength  = regime_data.get("strength", "MODERATE")
+
+        if regime == "BULL":
+            filter_side     = "long"
+            regime_min_score = MIN_SCORE
+        elif regime == "BEAR":
+            filter_side     = "short"
+            regime_min_score = MIN_SCORE
+        else:  # SIDEWAYS — take both directions but require higher score
+            filter_side     = "both"
+            regime_min_score = MIN_SCORE + 8
+
+        log.info("Regime: %s (%s) — scanning %s signals, min score %d" % (
+            regime, regime_strength, filter_side.upper(), regime_min_score))
+
         # ── BTC spike gate ────────────────────────────────────────────────────
         if btc_is_spiking():
             log.info("BTC spiking on 15m — pausing signals this cycle.")
@@ -1237,8 +1266,8 @@ async def main():
             continue
 
         try:
-            # Pull strong candidates from TradingView (both sides)
-            candidates = tv_scan(filter_side="both", limit=60)
+            # Pull strong candidates from TradingView filtered by regime
+            candidates = tv_scan(filter_side=filter_side, limit=60)
             log.info("TradingView returned %d candidates" % len(candidates))
 
             # Sort by absolute rating strength so we analyse the most opinionated signals first
@@ -1281,7 +1310,7 @@ async def main():
                         ob_imbalance=ob_imbal,
                     )
 
-                    if result:
+                    if result and result["score"] >= regime_min_score:
                         msg = build_message(result)
                         await bot.send_message(
                             chat_id=CHAT_ID,

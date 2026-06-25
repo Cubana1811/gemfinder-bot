@@ -255,20 +255,35 @@ async def monitor():
                 continue
 
             try:
+                risk = abs(t["entry"] - t["sl"])
+
                 if hit == "TP1":
                     await bot.send_message(chat_id=CHAT_ID, text=tp1_message(t, price))
-                    trades[key]["tp1_hit"] = True
+                    trades[key]["tp1_hit"]  = True
+                    trades[key]["result"]   = "WIN"
+                    r_mult = abs(t["tp1"] - t["entry"]) / risk if risk > 0 else 0
+                    trades[key]["r_multiple"] = round(r_mult, 2)
                 elif hit == "TP2":
                     await bot.send_message(chat_id=CHAT_ID, text=tp2_message(t, price))
-                    trades[key]["tp2_hit"] = True
+                    trades[key]["tp2_hit"]  = True
+                    trades[key]["result"]   = "WIN"
+                    r_mult = abs(t["tp2"] - t["entry"]) / risk if risk > 0 else 0
+                    trades[key]["r_multiple"] = round(r_mult, 2)
                 elif hit == "TP3":
                     await bot.send_message(chat_id=CHAT_ID, text=tp3_message(t, price))
-                    trades[key]["tp3_hit"] = True
-                    trades[key]["closed"]  = True
+                    trades[key]["tp3_hit"]   = True
+                    trades[key]["closed"]    = True
+                    trades[key]["result"]    = "WIN"
+                    trades[key]["closed_at"] = time.time()
+                    r_mult = abs(t["tp3"] - t["entry"]) / risk if risk > 0 else 0
+                    trades[key]["r_multiple"] = round(r_mult, 2)
                 elif hit == "SL":
                     await bot.send_message(chat_id=CHAT_ID, text=sl_message(t, price))
-                    trades[key]["sl_hit"] = True
-                    trades[key]["closed"] = True
+                    trades[key]["sl_hit"]    = True
+                    trades[key]["closed"]    = True
+                    trades[key]["result"]    = "LOSS"
+                    trades[key]["closed_at"] = time.time()
+                    trades[key]["r_multiple"] = -1.0
 
                 log.info("%s alert sent: %s %s" % (hit, t["symbol"], t["direction"]))
                 updated = True
