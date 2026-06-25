@@ -186,6 +186,21 @@ def fetch_btc_change():
         return float(data.get("priceChangePercent", 0))
     return 0.0
 
+def btc_is_spiking():
+    """
+    True if BTC moved >2% on any of the last 3 × 15m candles.
+    Signals fired into violent BTC moves have a far lower hit rate —
+    stop-hunts and cascading liquidations make all setups unreliable.
+    """
+    klines = safe_get("%s/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=4" % BINANCE_BASE)
+    if not klines or len(klines) < 3:
+        return False
+    for k in klines[-3:]:
+        o, c = float(k[1]), float(k[4])
+        if o > 0 and abs(c - o) / o * 100 > 2.0:
+            return True
+    return False
+
 # ════════════════════════════════════════════════════════════════════════════════
 # TECHNICAL INDICATORS (pure-Python, no deps)
 # ════════════════════════════════════════════════════════════════════════════════
@@ -237,6 +252,62 @@ def atr(highs, lows, closes, period=14):
                abs(lows[i]  - closes[i-1]))
            for i in range(1, len(closes))]
     return sum(trs[-period:]) / min(len(trs), period)
+
+def adx_value(highs, lows, closes, period=14):
+    """
+    Average Directional Index via Wilder smoothing.
+    >20 = trending market (safe to trade momentum signals).
+    >30 = strong trend (high-confidence setup).
+    <20 = choppy/ranging — signals here are coin-flips, skip them.
+    """
+    if len(closes) < period * 2:
+        return 0
+    plus_dm, minus_dm, tr_list = [], [], []
+    for i in range(1, len(closes)):
+        h_diff = highs[i] - highs[i - 1]
+        l_diff = lows[i - 1] - lows[i]
+        plus_dm.append(h_diff if h_diff > l_diff and h_diff > 0 else 0)
+        minus_dm.append(l_diff if l_diff > h_diff and l_diff > 0 else 0)
+        tr_list.append(max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i]  - closes[i - 1])
+        ))
+
+    def wilder(data, p):
+        s = sum(data[:p])
+        out = [s]
+        for v in data[p:]:
+            s = s - (s / p) + v
+            out.append(s)
+        return out
+
+    atr_s = wilder(tr_list, period)
+    pdm_s = wilder(plus_dm, period)
+    mdm_s = wilder(minus_dm, period)
+
+    dx_vals = []
+    for a, p, m in zip(atr_s, pdm_s, mdm_s):
+        if a == 0:
+            dx_vals.append(0)
+            continue
+        pdi = 100 * p / a
+        mdi = 100 * m / a
+        denom = pdi + mdi
+        dx_vals.append(100 * abs(pdi - mdi) / denom if denom > 0 else 0)
+
+    return sum(dx_vals[-period:]) / period if len(dx_vals) >= period else 0
+
+
+def is_active_session():
+    """
+    True during London (08:00–17:00 UTC) or New York (13:00–22:00 UTC).
+    The Asia dead-zone (22:00–08:00 UTC) has ~3× lower volume and
+    produces far more false breakouts — skip scanning during that window.
+    """
+    hour = datetime.now(timezone.utc).hour
+    return (8 <= hour < 17) or (13 <= hour < 22)   # covers 08:00–22:00 UTC
+
 
 def find_sr_zones(highs, lows, closes, tolerance=0.006):
     """
@@ -320,6 +391,14 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market):
 
     atr1h = atr(h1h, l1h, c1h)
     atr4h = atr(h4h, l4h, c4h)
+
+    adx4h = adx_value(h4h, l4h, c4h)
+
+    # ── ADX gate: skip choppy/ranging markets ────────────────────────────────
+    # ADX < 20 means the market has no directional conviction — momentum
+    # indicators lie in ranging markets and produce most false signals.
+    if adx4h < 20:
+        return None
 
     avg_vol   = sum(v1h[-20:]) / 20 if len(v1h) >= 20 else v1h[-1]
     vol_spike = v1h[-1] / avg_vol if avg_vol > 0 else 1
@@ -461,14 +540,23 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market):
     elif fear_greed > 65:
         short_score += 4
 
-    # 9. BTC correlation (max 5)
+    # 9. ADX trend strength bonus (max 10)
+    # Gate already rejected ADX < 20 above; here we reward strong trends
+    if adx4h >= 35:
+        long_score  += 10; long_reasons.append("ADX %.1f — very strong trend" % adx4h)
+        short_score += 10; short_reasons.append("ADX %.1f — very strong trend" % adx4h)
+    elif adx4h >= 25:
+        long_score  += 5;  long_reasons.append("ADX %.1f — trending market" % adx4h)
+        short_score += 5;  short_reasons.append("ADX %.1f — trending market" % adx4h)
+
+    # 10. BTC correlation (max 5)
     if btc_chg > 3:
         long_score += 5; long_reasons.append("BTC +%.1f%% macro lift" % btc_chg)
     elif btc_chg < -3:
         short_score += 5; short_reasons.append("BTC %.1f%% macro drag" % btc_chg)
 
     # ── Normalise to 100 ────────────────────────────────────────────────────────
-    max_pts = 136
+    max_pts = 146
     long_pct  = min(int(long_score  / max_pts * 100), 100)
     short_pct = min(int(short_score / max_pts * 100), 100)
 
@@ -576,6 +664,7 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market):
         "trend_4h":     trend_4h,
         "trend_1d":     trend_1d,
         "rsi1d":        rsi1d,
+        "adx4h":        adx4h,
         "supports":     supports,
         "resistances":  resistances,
         "fear_greed":   fear_greed,
@@ -652,6 +741,7 @@ def build_message(s):
         "=== TECHNICAL CONFIRMATION ===\n"
         "RSI  1h: %.1f  |  4h: %.1f  |  1d: %.1f\n"
         "MACD 1h: %s\n"
+        "ADX  4h: %.1f  (%s)\n"
         "Trend 1d: %s  |  4h: %s  |  1h: %s\n"
         "EMA 21: $%s  |  EMA 50: $%s\n"
         "Volume spike: %.1fx avg\n"
@@ -692,6 +782,8 @@ def build_message(s):
         s["rr"], s["leverage"],
         s["rsi1h"], s["rsi4h"], s["rsi1d"],
         "Bullish" if s["macd_1h"] > 0 else "Bearish",
+        s["adx4h"],
+        "Strong Trend" if s["adx4h"] >= 35 else "Trending" if s["adx4h"] >= 25 else "Weak",
         s["trend_1d"], s["trend_4h"], s["trend_1h"],
         fp(s["ema21"]), fp(s["ema50"]),
         s["vol_spike"],
@@ -723,13 +815,19 @@ async def main():
             "  3. ATR-based Entry / SL / TP calculated\n\n"
             "Indicators Used:\n"
             "  - TradingView Overall + MA + Oscillator rating\n"
-            "  - RSI (1h + 4h)\n"
+            "  - RSI (1h + 4h + Daily)\n"
             "  - MACD (1h + 4h)\n"
             "  - EMA 21 / 50 / 200 alignment\n"
-            "  - Market Structure (HH/HL)\n"
-            "  - Support & Resistance zones\n"
+            "  - ADX 4h (trend strength gate)\n"
+            "  - Market Structure (Daily + 4h + 1h)\n"
+            "  - S/R zones (3-touch minimum)\n"
             "  - Volume spike detection\n"
             "  - Fear & Greed + BTC correlation\n\n"
+            "Quality Gates:\n"
+            "  - Daily EMA 200 trend filter (no counter-trend)\n"
+            "  - ADX > 20 (trending markets only)\n"
+            "  - London/NY session only (08:00-22:00 UTC)\n"
+            "  - BTC spike pause (>2%% on 15m)\n\n"
             "Min Score: %d/100  |  Min R/R: %.1fx\n"
             "Scan every: %ds\n\n"
             "Not financial advice - DYOR!"
@@ -743,11 +841,24 @@ async def main():
         scan_count += 1
         log.info("Scan #%d starting..." % scan_count)
 
+        # ── Session gate ─────────────────────────────────────────────────────
+        if not is_active_session():
+            hour = datetime.now(timezone.utc).hour
+            log.info("Outside active session (UTC %02d:xx) — skipping scan." % hour)
+            await asyncio.sleep(SCAN_INTERVAL)
+            continue
+
         market = {
             "fear_greed": fetch_fear_greed(),
             "btc_chg":    fetch_btc_change(),
         }
         log.info("Market: FGI=%d  BTC=%+.2f%%" % (market["fear_greed"], market["btc_chg"]))
+
+        # ── BTC spike gate ────────────────────────────────────────────────────
+        if btc_is_spiking():
+            log.info("BTC spiking on 15m — pausing signals this cycle.")
+            await asyncio.sleep(SCAN_INTERVAL)
+            continue
 
         try:
             # Pull strong candidates from TradingView (both sides)
