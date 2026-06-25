@@ -344,6 +344,8 @@ async def dispatch(bot, message):
     if not text.startswith("/"):
         return
     chat_id = message["chat"]["id"]
+    if str(chat_id) != str(CHAT_ID):
+        return
     cmd     = text.split()[0].lower().split("@")[0]
     trades  = get_all_trades()
 

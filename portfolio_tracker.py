@@ -299,6 +299,8 @@ async def dispatch(bot, message):
     if not text.startswith("/"):
         return
     chat_id = message["chat"]["id"]
+    if str(chat_id) != str(CHAT_ID):
+        return
     parts   = text.split()
     cmd     = parts[0].lower().split("@")[0]
     args    = parts[1:]
