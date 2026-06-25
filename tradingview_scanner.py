@@ -238,8 +238,12 @@ def atr(highs, lows, closes, period=14):
            for i in range(1, len(closes))]
     return sum(trs[-period:]) / min(len(trs), period)
 
-def find_sr_zones(highs, lows, closes, tolerance=0.005):
-    levels = list(highs[-50:]) + list(lows[-50:])
+def find_sr_zones(highs, lows, closes, tolerance=0.006):
+    """
+    Only zones tested 3+ times are considered significant.
+    Uses last 100 candles so daily-level structure is captured.
+    """
+    levels = list(highs[-100:]) + list(lows[-100:])
     levels.sort()
     zones, used = [], set()
     for i, lvl in enumerate(levels):
@@ -249,13 +253,13 @@ def find_sr_zones(highs, lows, closes, tolerance=0.005):
             if j not in used and abs(levels[j] - lvl) / lvl <= tolerance:
                 cluster.append(levels[j])
                 used.add(j)
-        if len(cluster) >= 2:
+        if len(cluster) >= 3:                # 3-touch minimum for a real zone
             zones.append(sum(cluster) / len(cluster))
         used.add(i)
     price = closes[-1]
     supports    = sorted([z for z in zones if z < price], reverse=True)
     resistances = sorted([z for z in zones if z > price])
-    return supports[:3], resistances[:3]
+    return supports[:4], resistances[:4]
 
 def market_structure(highs, lows, lookback=5):
     sh, sl = [], []
@@ -278,13 +282,15 @@ def market_structure(highs, lows, lookback=5):
 # SCORING ENGINE
 # ════════════════════════════════════════════════════════════════════════════════
 
-def score_setup(tv, k1h_data, k4h_data, market):
+def score_setup(tv, k1h_data, k4h_data, k1d_data, market):
     """
     Score a symbol using TradingView ratings + Binance candle confirmation.
+    Daily candles are used as the HTF trend filter — no counter-trend trades.
     Returns a dict with direction, score, entry/SL/TP, and reasons.
     """
     o1h, h1h, l1h, c1h, v1h = k1h_data
     o4h, h4h, l4h, c4h, v4h = k4h_data
+    o1d, h1d, l1d, c1d, v1d = k1d_data
 
     if not c1h or not c4h:
         return None
@@ -300,6 +306,7 @@ def score_setup(tv, k1h_data, k4h_data, market):
     # ── Binance indicators ────────────────────────────────────────────────────
     rsi1h  = rsi(c1h)
     rsi4h  = rsi(c4h)
+    rsi1d  = rsi(c1d) if c1d else 50
     mh1h, ml1h = macd_hist(c1h)
     mh4h, _    = macd_hist(c4h)
 
@@ -307,6 +314,9 @@ def score_setup(tv, k1h_data, k4h_data, market):
     ema50_1h  = ema(c1h, 50)
     ema200_1h = ema(c1h, min(200, len(c1h)))
     ema50_4h  = ema(c4h, 50)
+    ema200_4h = ema(c4h, min(200, len(c4h)))
+    ema50_1d  = ema(c1d, min(50, len(c1d))) if c1d else 0
+    ema200_1d = ema(c1d, min(200, len(c1d))) if c1d else 0
 
     atr1h = atr(h1h, l1h, c1h)
     atr4h = atr(h4h, l4h, c4h)
@@ -316,7 +326,20 @@ def score_setup(tv, k1h_data, k4h_data, market):
 
     trend_1h = market_structure(h1h, l1h)
     trend_4h = market_structure(h4h, l4h)
-    supports, resistances = find_sr_zones(h1h, l1h, c1h)
+    trend_1d = market_structure(h1d, l1d) if h1d else "RANGING"
+
+    # Use 4h S/R zones — better balance of recency and significance
+    supports, resistances = find_sr_zones(h4h, l4h, c4h)
+
+    # ── HTF trend gate: reject counter-trend trades ───────────────────────────
+    # Daily EMA 200 is the definitive bull/bear dividing line
+    daily_bull = price > ema200_1d if ema200_1d else None
+    daily_bear = price < ema200_1d if ema200_1d else None
+    if daily_bull is not None:
+        if tv_rating > 0 and daily_bear:
+            return None   # trying to LONG below daily EMA 200 — counter-trend
+        if tv_rating < 0 and daily_bull:
+            return None   # trying to SHORT above daily EMA 200 — counter-trend
 
     fear_greed = market.get("fear_greed", 50)
     btc_chg    = market.get("btc_chg", 0)
@@ -388,15 +411,25 @@ def score_setup(tv, k1h_data, k4h_data, market):
     elif price < ema21_1h < ema50_1h:
         short_score += 8;  short_reasons.append("EMA 21 < 50 bearish")
 
-    # 5. Trend structure (max 10)
-    if trend_4h == "UPTREND" and trend_1h == "UPTREND":
+    # 5. Trend structure (max 15)
+    if trend_1d == "UPTREND" and trend_4h == "UPTREND" and trend_1h == "UPTREND":
+        long_score += 15; long_reasons.append("Aligned uptrend daily+4h+1h")
+    elif trend_4h == "UPTREND" and trend_1h == "UPTREND":
         long_score += 10; long_reasons.append("Market structure uptrend 4h+1h")
     elif trend_4h == "UPTREND":
         long_score += 5
-    if trend_4h == "DOWNTREND" and trend_1h == "DOWNTREND":
+    if trend_1d == "DOWNTREND" and trend_4h == "DOWNTREND" and trend_1h == "DOWNTREND":
+        short_score += 15; short_reasons.append("Aligned downtrend daily+4h+1h")
+    elif trend_4h == "DOWNTREND" and trend_1h == "DOWNTREND":
         short_score += 10; short_reasons.append("Market structure downtrend 4h+1h")
     elif trend_4h == "DOWNTREND":
         short_score += 5
+
+    # Daily EMA bonus (high-conviction with-trend trades only)
+    if daily_bull and ema50_1d and price > ema50_1d:
+        long_score += 8; long_reasons.append("Price above Daily EMA 50 & 200 (with trend)")
+    if daily_bear and ema50_1d and price < ema50_1d:
+        short_score += 8; short_reasons.append("Price below Daily EMA 50 & 200 (with trend)")
 
     # 6. S/R proximity (max 10)
     if supports:
@@ -451,25 +484,52 @@ def score_setup(tv, k1h_data, k4h_data, market):
         return None
 
     # ── ATR-based entry / SL / TP ──────────────────────────────────────────────
-    # Use 4h ATR for wider, more reliable levels; 1h ATR for TP1
     atr_val = (atr1h + atr4h) / 2
 
     if direction == "LONG":
-        entry = price
-        sl    = entry - atr_val * 1.8
-        tp1   = entry + atr_val * 1.5
-        tp2   = entry + atr_val * 3.0
-        tp3   = entry + atr_val * 5.0
-        if supports and supports[0] > sl:
-            sl = supports[0] * 0.997   # just below nearest support
+        # Ideal entry: current price OR nearest support zone (whichever is closer
+        # and within 1.5% — avoids entering deep into an already-extended move)
+        if supports and abs(price - supports[0]) / price <= 0.015:
+            entry = supports[0] * 1.001   # just above support as limit entry
+        else:
+            entry = price
+
+        sl  = entry - atr_val * 1.8
+        # Anchor SL below nearest confirmed support (3-touch zone)
+        if supports:
+            structural_sl = supports[0] * 0.997
+            sl = max(sl, structural_sl) if structural_sl > sl else sl
+            if sl >= entry: sl = entry - atr_val * 1.8   # safety fallback
+
+        tp1 = entry + atr_val * 1.5
+        tp2 = entry + atr_val * 3.0
+        tp3 = entry + atr_val * 5.0
+        # Snap TP2/TP3 to resistance zones if they exist nearby
+        if resistances:
+            for res in resistances:
+                if tp1 < res <= tp2 * 1.05:
+                    tp2 = res * 0.998
+                    break
     else:
-        entry = price
-        sl    = entry + atr_val * 1.8
-        tp1   = entry - atr_val * 1.5
-        tp2   = entry - atr_val * 3.0
-        tp3   = entry - atr_val * 5.0
-        if resistances and resistances[0] < sl:
-            sl = resistances[0] * 1.003
+        if resistances and abs(price - resistances[0]) / price <= 0.015:
+            entry = resistances[0] * 0.999
+        else:
+            entry = price
+
+        sl  = entry + atr_val * 1.8
+        if resistances:
+            structural_sl = resistances[0] * 1.003
+            sl = min(sl, structural_sl) if structural_sl < sl else sl
+            if sl <= entry: sl = entry + atr_val * 1.8
+
+        tp1 = entry - atr_val * 1.5
+        tp2 = entry - atr_val * 3.0
+        tp3 = entry - atr_val * 5.0
+        if supports:
+            for sup in supports:
+                if tp1 > sup >= tp2 * 0.95:
+                    tp2 = sup * 1.002
+                    break
 
     risk   = abs(entry - sl)
     reward = abs(tp2 - entry)
@@ -514,6 +574,8 @@ def score_setup(tv, k1h_data, k4h_data, market):
         "tv_osc":       tv_osc,
         "trend_1h":     trend_1h,
         "trend_4h":     trend_4h,
+        "trend_1d":     trend_1d,
+        "rsi1d":        rsi1d,
         "supports":     supports,
         "resistances":  resistances,
         "fear_greed":   fear_greed,
@@ -588,9 +650,9 @@ def build_message(s):
         "Leverage:   %s  (use responsibly)\n"
         "\n"
         "=== TECHNICAL CONFIRMATION ===\n"
-        "RSI  1h: %.1f  |  4h: %.1f\n"
+        "RSI  1h: %.1f  |  4h: %.1f  |  1d: %.1f\n"
         "MACD 1h: %s\n"
-        "Trend 1h: %s  |  4h: %s\n"
+        "Trend 1d: %s  |  4h: %s  |  1h: %s\n"
         "EMA 21: $%s  |  EMA 50: $%s\n"
         "Volume spike: %.1fx avg\n"
         "Support zones:    %s\n"
@@ -628,9 +690,9 @@ def build_message(s):
         fp(s["tp2"]),  tp2_pct,
         fp(s["tp3"]),  tp3_pct,
         s["rr"], s["leverage"],
-        s["rsi1h"], s["rsi4h"],
+        s["rsi1h"], s["rsi4h"], s["rsi1d"],
         "Bullish" if s["macd_1h"] > 0 else "Bearish",
-        s["trend_1h"], s["trend_4h"],
+        s["trend_1d"], s["trend_4h"], s["trend_1h"],
         fp(s["ema21"]), fp(s["ema50"]),
         s["vol_spike"],
         sup_str, res_str,
@@ -708,7 +770,8 @@ async def main():
 
                 try:
                     k1h = fetch_klines(symbol, "1h",  200); time.sleep(0.15)
-                    k4h = fetch_klines(symbol, "4h",  100); time.sleep(0.15)
+                    k4h = fetch_klines(symbol, "4h",  150); time.sleep(0.15)
+                    k1d = fetch_klines(symbol, "1d",   60); time.sleep(0.15)
 
                     if not k1h or not k4h:
                         continue
@@ -717,6 +780,7 @@ async def main():
                         tv,
                         parse_klines(k1h),
                         parse_klines(k4h),
+                        parse_klines(k1d) if k1d else ([], [], [], [], []),
                         market,
                     )
 
