@@ -5,3 +5,4 @@ trade_journal: python trade_journal.py
 news_sentiment: python news_sentiment.py
 whale_alert: python whale_alert.py
 portfolio_tracker: python portfolio_tracker.py
+market_regime: python market_regime.py
