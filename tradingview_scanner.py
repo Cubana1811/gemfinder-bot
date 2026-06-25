@@ -1,11 +1,40 @@
 import os
 import time
 import math
+import json
 import logging
 import requests
 import asyncio
 from telegram import Bot
 from datetime import datetime, timezone
+
+TRADES_FILE = "active_trades.json"
+
+def save_signal_for_tracker(result):
+    """Write signal to shared file so tp_tracker.py can monitor it."""
+    try:
+        trades = {}
+        if os.path.exists(TRADES_FILE):
+            with open(TRADES_FILE, "r") as f:
+                trades = json.load(f)
+        key = "%s_%s_%d" % (result["symbol"], result["direction"], int(time.time()))
+        trades[key] = {
+            "symbol":     result["symbol"],
+            "direction":  result["direction"],
+            "entry":      result["entry"],
+            "sl":         result["sl"],
+            "tp1":        result["tp1"],
+            "tp2":        result["tp2"],
+            "tp3":        result["tp3"],
+            "score":      result["score"],
+            "tier":       result["tier"],
+            "opened_at":  time.time(),
+            "closed":     False,
+        }
+        with open(TRADES_FILE, "w") as f:
+            json.dump(trades, f, indent=2)
+    except Exception as e:
+        log.warning("Could not save signal for tracker: %s" % e)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
@@ -1259,6 +1288,7 @@ async def main():
                             text=msg,
                             disable_web_page_preview=True,
                         )
+                        save_signal_for_tracker(result)
                         seen_signals[symbol] = time.time()
                         signals_sent += 1
                         log.info("Signal: %s %s score=%d tier=%s rr=%.2f" % (
