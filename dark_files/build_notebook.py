@@ -350,97 +350,95 @@ print(f"⏱️   Total duration: {total_duration:.1f}s  ({total_duration/60:.1f}
 """)
 
 CELL_LOAD_MODEL = code("""\
-# ── STEP 6: Load CogVideoX-2B video model ───────────────────────
+# ── STEP 6: Load Stable Diffusion 1.5 image model ───────────────
 #
-#  CogVideoX-2B: ~5 GB download — fits perfectly on free T4 GPU
-#  First run downloads once; reused for the whole session.
+#  SD 1.5: ~4 GB download — runs perfectly on free T4 GPU.
+#  Generates one cinematic image per scene; FFmpeg adds
+#  Ken Burns pan/zoom motion to create video clips.
 # ─────────────────────────────────────────────────────────────────
 import torch
-from diffusers import CogVideoXPipeline
-from diffusers.utils import export_to_video
+from diffusers import StableDiffusionPipeline
 
 torch.cuda.empty_cache()
-print("Loading CogVideoX-2B (~5 GB — first run only, please wait)...\\n")
+print("Loading Stable Diffusion 1.5 (~4 GB — first run only, please wait)...\\n")
 
-pipe = CogVideoXPipeline.from_pretrained(
-    "THUDM/CogVideoX-2b",
+pipe = StableDiffusionPipeline.from_pretrained(
+    "runwayml/stable-diffusion-v1-5",
     torch_dtype=torch.float16,
     cache_dir='/content/dark_files/cache',
+    safety_checker=None,
+    requires_safety_checker=False,
 )
-pipe.enable_model_cpu_offload()
-pipe.vae.enable_slicing()
-pipe.vae.enable_tiling()
+pipe = pipe.to("cuda")
 
-print(f"\\n✅  CogVideoX-2B loaded!")
+print(f"\\n✅  Stable Diffusion 1.5 loaded!")
 print(f"    VRAM used: {torch.cuda.memory_allocated()/1e9:.2f} GB / 16 GB")
 """)
 
 CELL_GEN_CLIPS = code("""\
-# ── STEP 7: Generate video clips (CogVideoX-2B) ─────────────────
+# ── STEP 7: Generate cinematic images + Ken Burns motion clips ───
 #
-#  CogVideoX-2B: 49 frames @ 8 fps = ~6 sec per clip
-#  Each clip is trimmed or looped to match the voiceover duration.
+#  Stable Diffusion generates one dark cinematic image per scene.
+#  FFmpeg applies Ken Burns pan/zoom to turn each image into video.
+#  Fast, memory-safe, cinematic results.
 # ─────────────────────────────────────────────────────────────────
 import time
-from diffusers.utils import export_to_video
 
-def gen_clip(prompt, out_path, seed=0):
+KEN_BURNS = [
+    "zoompan=z='min(zoom+0.0015,1.5)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
+    "zoompan=z='min(zoom+0.0012,1.4)':x='min(iw-iw/zoom,iw/2-(iw/zoom/2)+in*0.4)':y='ih/2-(ih/zoom/2)'",
+    "zoompan=z='min(zoom+0.0012,1.4)':x='iw/2-(iw/zoom/2)':y='max(0,ih/2-(ih/zoom/2)-in*0.3)'",
+    "zoompan=z='max(1.0,1.5-in*0.0018)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
+    "zoompan=z='1.35':x='min(iw-iw/zoom,in*0.6)':y='ih/2-(ih/zoom/2)'",
+]
+
+def gen_image(prompt, neg, img_path, seed=0):
     gen = torch.Generator(device='cuda').manual_seed(seed)
-    out = pipe(
+    img = pipe(
         prompt=prompt,
-        num_videos_per_prompt=1,
-        num_inference_steps=50,
-        num_frames=49,
-        guidance_scale=6,
+        negative_prompt=neg,
+        width=768, height=432,
+        num_inference_steps=30,
+        guidance_scale=7.5,
         generator=gen,
-    )
-    export_to_video(out.frames[0], out_path, fps=8)
-    return out_path
+    ).images[0]
+    img.save(img_path)
 
-def trim_to_duration(src, dst, duration):
-    r = subprocess.run(
-        ['ffprobe','-v','quiet','-print_format','json','-show_format', src],
-        capture_output=True, text=True
-    )
-    clip_dur = float(json.loads(r.stdout)['format']['duration'])
-    if clip_dur >= duration:
-        subprocess.run([
-            'ffmpeg','-i', src,'-t', str(duration),
-            '-c:v','libx264','-crf','18','-preset','fast',
-            '-pix_fmt','yuv420p', dst, '-y'
-        ], capture_output=True, check=True)
-    else:
-        loops = math.ceil(duration / clip_dur)
-        subprocess.run([
-            'ffmpeg','-stream_loop', str(loops),'-i', src,
-            '-t', str(duration),
-            '-c:v','libx264','-crf','18','-preset','fast',
-            '-pix_fmt','yuv420p', dst, '-y'
-        ], capture_output=True, check=True)
+def image_to_video(img_path, out_path, duration, effect_idx=0):
+    fps    = 25
+    frames = int(duration * fps) + 2
+    effect = KEN_BURNS[effect_idx % len(KEN_BURNS)]
+    subprocess.run([
+        'ffmpeg', '-loop', '1', '-i', img_path,
+        '-vf', f"{effect}:d={frames}:s=768x432,fps={fps}",
+        '-t', str(duration),
+        '-c:v', 'libx264', '-crf', '18', '-preset', 'fast',
+        '-pix_fmt', 'yuv420p', out_path, '-y'
+    ], capture_output=True, check=True)
 
-print(f"Generating {len(scenes)} video clips (CogVideoX-2B) ...\\n{'='*65}")
+print(f"Generating {len(scenes)} cinematic clips ...\\n{'='*65}")
 clip_paths = []
 t0 = time.time()
 
 for i, (scene, dur) in enumerate(zip(scenes, durations)):
-    raw   = f'/content/dark_files/clips/clip_{i:03d}_raw.mp4'
-    final = f'/content/dark_files/clips/clip_{i:03d}.mp4'
-    prompt, _ = make_prompt(scene)
+    img_path = f'/content/dark_files/clips/scene_{i:03d}.png'
+    out_path = f'/content/dark_files/clips/clip_{i:03d}.mp4'
+    prompt, neg = make_prompt(scene)
 
-    print(f"\\nClip {i+1}/{len(scenes)}  ({dur:.1f}s)")
+    print(f"\\nScene {i+1}/{len(scenes)} ({dur:.1f}s)")
     print(f"    {prompt[:85]}...")
 
     t1 = time.time()
-    gen_clip(prompt, raw, seed=i * 17 + 42)
-    trim_to_duration(raw, final, dur)
-    clip_paths.append(final)
+    gen_image(prompt, neg, img_path, seed=i * 17 + 42)
+    image_to_video(img_path, out_path, dur, effect_idx=i)
+    clip_paths.append(out_path)
 
     elapsed = time.time() - t1
     done    = i + 1
     eta     = (time.time() - t0) / done * (len(scenes) - done)
     print(f"    Done: {elapsed:.0f}s  |  ETA: ~{eta/60:.0f} min remaining")
 
-print(f"\\nAll clips generated! Total: {(time.time()-t0)/60:.1f} min")
+print(f"\\nAll clips done! Total: {(time.time()-t0)/60:.1f} min")
 """)
 
 CELL_MUSIC = code("""\
