@@ -272,22 +272,26 @@ TXT_X = 2.2   # text block centre x
 TXT_Y = 1.5   # text block centre y
 
 # ── Stick figure builder ──────────────────────────────────────────────────────
-def _fig(cx, la, ra, ll, rl, extras=None):
+# EVERY pose produces exactly 7 VGroup elements so Transform never hits a
+# count mismatch. Element 7 is a symbol (? / !) or an invisible dot placeholder.
+def _fig(cx, la, ra, ll, rl, symbol=""):
     SY = FY + 0.50   # shoulder y = -0.95
     HY = FY - 0.30   # hips y    = -1.75
-    g = VGroup(
+    sym = Text(symbol if symbol else ".", font=FONT, font_size=34, color=ACC)
+    sym.move_to([cx + 0.60, FY + 1.62, 0])
+    if not symbol:
+        sym.set_opacity(0)
+    return VGroup(
         Circle(0.22, color=INK, stroke_width=3, fill_opacity=0).move_to([cx, FY+1.22, 0]),
         Line([cx, FY+0.99, 0], [cx, HY, 0], color=INK, stroke_width=3),
         Line([cx, SY, 0], la, color=INK, stroke_width=3),
         Line([cx, SY, 0], ra, color=INK, stroke_width=3),
         Line([cx, HY, 0], ll, color=INK, stroke_width=3),
         Line([cx, HY, 0], rl, color=INK, stroke_width=3),
+        sym,
     )
-    if extras:
-        g.add(*extras)
-    return g
 
-# ── Poses ─────────────────────────────────────────────────────────────────────
+# ── Poses (all exactly 7 elements — safe to Transform between any two) ────────
 def stand(cx):
     return _fig(cx,
         la=[cx-0.55, -1.95, 0], ra=[cx+0.55, -1.95, 0],
@@ -301,21 +305,17 @@ def explain(cx):
 
 def think(cx):
     # Right hand near chin, question mark above head
-    qm = Text("?", font=FONT, font_size=32, color=ACC)
-    qm.move_to([cx+0.65, FY+1.60, 0])
     return _fig(cx,
         la=[cx-0.45, -1.95, 0], ra=[cx+0.22, -0.52, 0],
         ll=[cx-0.28, -2.50, 0], rl=[cx+0.28, -2.50, 0],
-        extras=[qm])
+        symbol="?")
 
 def excited(cx):
-    # Both arms raised high, exclamation mark above
-    em = Text("!", font=FONT, font_size=38, color=ACC)
-    em.move_to([cx, FY+1.80, 0])
+    # Both arms raised, exclamation mark above head
     return _fig(cx,
         la=[cx-0.65, -0.62, 0], ra=[cx+0.65, -0.62, 0],
         ll=[cx-0.32, -2.50, 0], rl=[cx+0.32, -2.50, 0],
-        extras=[em])
+        symbol="!")
 
 def serious(cx):
     # Arms hanging low, drooped posture
@@ -330,7 +330,7 @@ def walk_a(cx):
         ll=[cx-0.15, -2.50, 0], rl=[cx+0.50, -2.22, 0])
 
 def walk_b(cx):
-    # Right arm + left leg forward (stride B — alternates with A)
+    # Right arm + left leg forward (stride B)
     return _fig(cx,
         la=[cx-0.35, -1.38, 0], ra=[cx+0.55, -0.58, 0],
         ll=[cx-0.50, -2.22, 0], rl=[cx+0.15, -2.50, 0])
