@@ -18,7 +18,10 @@ Output: per-symbol stats + overall win rate, profit factor, average R/R.
 import time
 import requests
 
-BINANCE_BASE = "https://fapi.binance.com"
+BYBIT_BASE   = "https://api.bybit.com"
+INTERVAL_MAP = {"1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
+                "1h": "60", "2h": "120", "4h": "240", "6h": "360", "12h": "720",
+                "1d": "D", "1w": "W"}
 
 COINS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
@@ -39,9 +42,12 @@ def safe_get(url, timeout=15):
     return None
 
 def fetch_klines(symbol, interval="4h", limit=540):
-    data = safe_get("%s/fapi/v1/klines?symbol=%s&interval=%s&limit=%s" % (
-        BINANCE_BASE, symbol, interval, limit))
-    return data or []
+    bybit_interval = INTERVAL_MAP.get(interval, interval)
+    data = safe_get("%s/v5/market/kline?category=linear&symbol=%s&interval=%s&limit=%s" % (
+        BYBIT_BASE, symbol, bybit_interval, limit))
+    if data and data.get("retCode") == 0:
+        return list(reversed(data["result"]["list"]))
+    return []
 
 def parse_klines(klines):
     if not klines:

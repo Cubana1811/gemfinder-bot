@@ -16,7 +16,10 @@ MIN_RR          = 2.0        # minimum risk/reward ratio
 SIGNAL_COOLDOWN = 7200       # 2 hours cooldown per symbol
 MAX_SIGNALS     = 3          # max signals per scan cycle
 
-BINANCE_BASE    = "https://fapi.binance.com"
+BYBIT_BASE      = "https://api.bybit.com"
+INTERVAL_MAP    = {"1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
+                   "1h": "60", "2h": "120", "4h": "240", "6h": "360", "12h": "720",
+                   "1d": "D", "1w": "W"}
 FEAR_GREED_URL  = "https://api.alternative.me/fng/?limit=1"
 TV_SCAN_URL     = "https://scanner.tradingview.com/crypto/scan"
 
@@ -155,63 +158,54 @@ def safe_get(url, timeout=10):
     return None
 
 def fetch_klines(symbol, interval, limit=200):
-    data = safe_get("%s/fapi/v1/klines?symbol=%s&interval=%s&limit=%s" % (
-        BINANCE_BASE, symbol, interval, limit))
-    return data or []
+    bybit_interval = INTERVAL_MAP.get(interval, interval)
+    data = safe_get("%s/v5/market/kline?category=linear&symbol=%s&interval=%s&limit=%s" % (
+        BYBIT_BASE, symbol, bybit_interval, limit))
+    if data and data.get("retCode") == 0:
+        return list(reversed(data["result"]["list"]))
+    return []
 
 def fetch_funding_rate(symbol):
-    data = safe_get("%s/fapi/v1/fundingRate?symbol=%s&limit=3" % (BINANCE_BASE, symbol))
-    if data:
-        return float(data[-1].get("fundingRate", 0)) * 100
+    data = safe_get("%s/v5/market/funding/history?category=linear&symbol=%s&limit=3" % (
+        BYBIT_BASE, symbol))
+    if data and data.get("retCode") == 0:
+        entries = data["result"]["list"]
+        if entries:
+            return float(entries[0].get("fundingRate", 0)) * 100
     return 0.0
 
 def fetch_oi_change(symbol):
-    data = safe_get("%s/futures/data/openInterestHist?symbol=%s&period=1h&limit=8" % (
-        BINANCE_BASE, symbol))
-    if data and len(data) >= 2:
-        old = float(data[0].get("sumOpenInterest", 1))
-        new = float(data[-1].get("sumOpenInterest", 1))
-        return (new - old) / old * 100 if old else 0
+    data = safe_get("%s/v5/market/open-interest?category=linear&symbol=%s&intervalTime=1h&limit=8" % (
+        BYBIT_BASE, symbol))
+    if data and data.get("retCode") == 0:
+        entries = data["result"]["list"]
+        if len(entries) >= 2:
+            new = float(entries[0].get("openInterest", 1))
+            old = float(entries[-1].get("openInterest", 1))
+            return (new - old) / old * 100 if old else 0
     return 0.0
 
 def fetch_top_trader_ratio(symbol):
-    """
-    Binance 'top trader' long/short position ratio — the top 20% of accounts
-    by PnL.  These are the smart-money accounts on the exchange.
-    >1.5 = smart money heavily net long.  <0.7 = heavily net short.
-    """
-    data = safe_get(
-        "%s/futures/data/topLongShortPositionRatio?symbol=%s&period=1h&limit=5"
-        % (BINANCE_BASE, symbol))
-    if data and len(data) > 0:
-        return float(data[-1].get("longShortRatio", 1.0))
+    # No direct Bybit equivalent; return neutral
     return 1.0
 
 def fetch_taker_ratio(symbol):
-    """
-    Taker buy volume / taker sell volume over the last hour.
-    >1.3 = aggressive buyers dominating.  <0.77 = aggressive sellers dominating.
-    Taker orders are the impatient, conviction-driven side of the market.
-    """
-    data = safe_get(
-        "%s/futures/data/takerlongshortRatio?symbol=%s&period=1h&limit=5"
-        % (BINANCE_BASE, symbol))
-    if data and len(data) > 0:
-        return float(data[-1].get("buySellRatio", 1.0))
+    # No direct Bybit equivalent; return neutral
     return 1.0
 
 def fetch_order_book_imbalance(symbol, depth=20):
     """
-    Bid $ value / Ask $ value from the top 20 levels of the order book.
+    Bid $ value / Ask $ value from the top N levels of the order book.
     >1.5 = large buy walls (price supported).  <0.67 = large sell walls.
-    This shows where institutional limit orders are actually sitting.
     """
-    data = safe_get("%s/fapi/v1/depth?symbol=%s&limit=%d" % (BINANCE_BASE, symbol, depth))
-    if not data:
-        return 1.0
-    bid_val = sum(float(b[0]) * float(b[1]) for b in data.get("bids", []))
-    ask_val = sum(float(a[0]) * float(a[1]) for a in data.get("asks", []))
-    return round(bid_val / ask_val, 3) if ask_val > 0 else 1.0
+    data = safe_get("%s/v5/market/orderbook?category=linear&symbol=%s&limit=%d" % (
+        BYBIT_BASE, symbol, depth))
+    if data and data.get("retCode") == 0:
+        result = data["result"]
+        bid_val = sum(float(b[0]) * float(b[1]) for b in result.get("b", []))
+        ask_val = sum(float(a[0]) * float(a[1]) for a in result.get("a", []))
+        return round(bid_val / ask_val, 3) if ask_val > 0 else 1.0
+    return 1.0
 
 def fetch_fear_greed():
     data = safe_get(FEAR_GREED_URL)
@@ -220,9 +214,11 @@ def fetch_fear_greed():
     return 50
 
 def fetch_btc_change():
-    data = safe_get("%s/fapi/v1/ticker/24hr?symbol=BTCUSDT" % BINANCE_BASE)
-    if data:
-        return float(data.get("priceChangePercent", 0))
+    data = safe_get("%s/v5/market/tickers?category=linear&symbol=BTCUSDT" % BYBIT_BASE)
+    if data and data.get("retCode") == 0:
+        tickers = data["result"]["list"]
+        if tickers:
+            return float(tickers[0].get("price24hPcnt", 0)) * 100
     return 0.0
 
 def btc_is_spiking():
@@ -231,8 +227,11 @@ def btc_is_spiking():
     Signals fired into violent BTC moves have a far lower hit rate —
     stop-hunts and cascading liquidations make all setups unreliable.
     """
-    klines = safe_get("%s/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=4" % BINANCE_BASE)
-    if not klines or len(klines) < 3:
+    data = safe_get("%s/v5/market/kline?category=linear&symbol=BTCUSDT&interval=15&limit=4" % BYBIT_BASE)
+    if not data or data.get("retCode") != 0:
+        return False
+    klines = list(reversed(data["result"]["list"]))
+    if len(klines) < 3:
         return False
     for k in klines[-3:]:
         o, c = float(k[1]), float(k[4])

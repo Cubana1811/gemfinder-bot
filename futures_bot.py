@@ -14,8 +14,10 @@ SCAN_INTERVAL    = 300        # 5 minutes
 MIN_SCORE        = 75         # minimum confluence score
 MIN_RR           = 2.0        # minimum risk/reward ratio
 SIGNAL_COOLDOWN  = 7200       # 2 hours between signals per pair
-BINANCE_BASE     = "https://fapi.binance.com"
-SPOT_BASE        = "https://api.binance.com"
+BYBIT_BASE       = "https://api.bybit.com"
+INTERVAL_MAP     = {"1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
+                    "1h": "60", "2h": "120", "4h": "240", "6h": "360", "12h": "720",
+                    "1d": "D", "1w": "W"}
 FEAR_GREED_URL   = "https://api.alternative.me/fng/?limit=1"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -35,45 +37,64 @@ def safe_get(url, timeout=10):
     return None
 
 def fetch_top_pairs(min_vol=50_000_000):
-    data = safe_get("%s/fapi/v1/ticker/24hr" % BINANCE_BASE)
-    if not data: return []
-    pairs = [t for t in data if t.get("symbol","").endswith("USDT")]
-    pairs = [t for t in pairs if float(t.get("quoteVolume",0)) >= min_vol]
-    pairs.sort(key=lambda x: float(x.get("quoteVolume",0)), reverse=True)
-    return pairs[:40]
+    data = safe_get("%s/v5/market/tickers?category=linear" % BYBIT_BASE)
+    if not data or data.get("retCode") != 0:
+        return []
+    tickers = data["result"]["list"]
+    pairs = [t for t in tickers if t.get("symbol", "").endswith("USDT")]
+    pairs = [t for t in pairs if float(t.get("turnover24h", 0)) >= min_vol]
+    pairs.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
+    # Normalize to Binance-compatible field names used downstream
+    normalized = []
+    for t in pairs[:40]:
+        normalized.append({
+            "symbol":             t["symbol"],
+            "lastPrice":          t.get("lastPrice", "0"),
+            "quoteVolume":        t.get("turnover24h", "0"),
+            "priceChangePercent": str(float(t.get("price24hPcnt", "0")) * 100),
+        })
+    return normalized
 
 def fetch_klines(symbol, interval, limit=200):
-    data = safe_get("%s/fapi/v1/klines?symbol=%s&interval=%s&limit=%s" % (
-        BINANCE_BASE, symbol, interval, limit))
-    return data or []
+    bybit_interval = INTERVAL_MAP.get(interval, interval)
+    data = safe_get("%s/v5/market/kline?category=linear&symbol=%s&interval=%s&limit=%s" % (
+        BYBIT_BASE, symbol, bybit_interval, limit))
+    if data and data.get("retCode") == 0:
+        return list(reversed(data["result"]["list"]))
+    return []
 
 def fetch_funding_rate(symbol):
-    data = safe_get("%s/fapi/v1/fundingRate?symbol=%s&limit=3" % (BINANCE_BASE, symbol))
-    if data and len(data) > 0:
-        return float(data[-1].get("fundingRate", 0)) * 100
+    data = safe_get("%s/v5/market/funding/history?category=linear&symbol=%s&limit=3" % (
+        BYBIT_BASE, symbol))
+    if data and data.get("retCode") == 0:
+        entries = data["result"]["list"]
+        if entries:
+            return float(entries[0].get("fundingRate", 0)) * 100
     return 0.0
 
 def fetch_open_interest(symbol):
-    data = safe_get("%s/fapi/v1/openInterest?symbol=%s" % (BINANCE_BASE, symbol))
-    if data:
-        return float(data.get("openInterest", 0))
+    data = safe_get("%s/v5/market/open-interest?category=linear&symbol=%s&intervalTime=1h&limit=1" % (
+        BYBIT_BASE, symbol))
+    if data and data.get("retCode") == 0:
+        entries = data["result"]["list"]
+        if entries:
+            return float(entries[0].get("openInterest", 0))
     return 0.0
 
 def fetch_oi_history(symbol):
-    data = safe_get("%s/futures/data/openInterestHist?symbol=%s&period=1h&limit=24" % (
-        BINANCE_BASE, symbol))
-    if data and len(data) >= 2:
-        old_oi = float(data[0].get("sumOpenInterest", 0))
-        new_oi = float(data[-1].get("sumOpenInterest", 0))
-        change = (new_oi - old_oi) / old_oi * 100 if old_oi > 0 else 0
-        return change, new_oi
+    data = safe_get("%s/v5/market/open-interest?category=linear&symbol=%s&intervalTime=1h&limit=24" % (
+        BYBIT_BASE, symbol))
+    if data and data.get("retCode") == 0:
+        entries = data["result"]["list"]
+        if len(entries) >= 2:
+            new_oi = float(entries[0].get("openInterest", 0))
+            old_oi = float(entries[-1].get("openInterest", 0))
+            change = (new_oi - old_oi) / old_oi * 100 if old_oi > 0 else 0
+            return change, new_oi
     return 0.0, 0.0
 
 def fetch_long_short_ratio(symbol):
-    data = safe_get("%s/futures/data/globalLongShortAccountRatio?symbol=%s&period=1h&limit=5" % (
-        BINANCE_BASE, symbol))
-    if data and len(data) > 0:
-        return float(data[-1].get("longShortRatio", 1.0))
+    # No direct Bybit equivalent; return neutral
     return 1.0
 
 def fetch_fear_greed():
@@ -90,9 +111,11 @@ def fetch_btc_dominance():
     return 50.0
 
 def fetch_btc_ticker():
-    data = safe_get("%s/fapi/v1/ticker/24hr?symbol=BTCUSDT" % BINANCE_BASE)
-    if data:
-        return float(data.get("priceChangePercent", 0))
+    data = safe_get("%s/v5/market/tickers?category=linear&symbol=BTCUSDT" % BYBIT_BASE)
+    if data and data.get("retCode") == 0:
+        tickers = data["result"]["list"]
+        if tickers:
+            return float(tickers[0].get("price24hPcnt", 0)) * 100
     return 0.0
 
 # ════════════════════════════════════════════════════════════════════════════
