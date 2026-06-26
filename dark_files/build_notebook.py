@@ -350,108 +350,97 @@ print(f"⏱️   Total duration: {total_duration:.1f}s  ({total_duration/60:.1f}
 """)
 
 CELL_LOAD_MODEL = code("""\
-# ── STEP 6: Load LTX-Video model ────────────────────────────────
+# ── STEP 6: Load CogVideoX-2B video model ───────────────────────
 #
-#  First run downloads ~4 GB — this is a one-time download per session.
-#  Subsequent runs in the same session reuse the cache.
+#  CogVideoX-2B: ~5 GB download — fits perfectly on free T4 GPU
+#  First run downloads once; reused for the whole session.
 # ─────────────────────────────────────────────────────────────────
 import torch
-from diffusers import LTXPipeline
+from diffusers import CogVideoXPipeline
 from diffusers.utils import export_to_video
 
 torch.cuda.empty_cache()
-print("⬇️   Loading LTX-Video (Lightricks) ...\\n"
-      "    First run downloads ~4 GB — please wait.\\n")
+print("Loading CogVideoX-2B (~5 GB — first run only, please wait)...\\n")
 
-pipe = LTXPipeline.from_pretrained(
-    "Lightricks/LTX-Video",
-    torch_dtype=torch.bfloat16,
+pipe = CogVideoXPipeline.from_pretrained(
+    "THUDM/CogVideoX-2b",
+    torch_dtype=torch.float16,
     cache_dir='/content/dark_files/cache',
 )
-pipe.enable_model_cpu_offload()   # keeps VRAM usage low on T4
+pipe.enable_model_cpu_offload()
+pipe.vae.enable_slicing()
+pipe.vae.enable_tiling()
 
-print(f"\\n✅  LTX-Video loaded!")
-print(f"💾  VRAM allocated: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+print(f"\\n✅  CogVideoX-2B loaded!")
+print(f"    VRAM used: {torch.cuda.memory_allocated()/1e9:.2f} GB / 16 GB")
 """)
 
 CELL_GEN_CLIPS = code("""\
-# ── STEP 7: Generate video clips ────────────────────────────────
+# ── STEP 7: Generate video clips (CogVideoX-2B) ─────────────────
+#
+#  CogVideoX-2B: 49 frames @ 8 fps = ~6 sec per clip
+#  Each clip is trimmed or looped to match the voiceover duration.
+# ─────────────────────────────────────────────────────────────────
 import time
 from diffusers.utils import export_to_video
 
-def valid_frames(secs, fps=25):
-    \"\"\"Return a valid LTX-Video frame count (8k+1) for the given duration.\"\"\"
-    n = max(25, int(secs * fps))
-    n = ((n - 1) // 8) * 8 + 1
-    return min(n, 257)
-
-def gen_clip(prompt, neg, n_frames, out_path, seed=0):
+def gen_clip(prompt, out_path, seed=0):
     gen = torch.Generator(device='cuda').manual_seed(seed)
     out = pipe(
         prompt=prompt,
-        negative_prompt=neg,
-        width=704, height=480,
-        num_frames=n_frames,
-        num_inference_steps=30,
-        guidance_scale=3.5,
+        num_videos_per_prompt=1,
+        num_inference_steps=50,
+        num_frames=49,
+        guidance_scale=6,
         generator=gen,
     )
-    frames = out.frames[0]
-    export_to_video(frames, out_path, fps=25)
+    export_to_video(out.frames[0], out_path, fps=8)
     return out_path
 
 def trim_to_duration(src, dst, duration):
-    \"\"\"Trim/pad clip to match exact audio duration.\"\"\"
-    # Get actual clip duration
     r = subprocess.run(
         ['ffprobe','-v','quiet','-print_format','json','-show_format', src],
         capture_output=True, text=True
     )
     clip_dur = float(json.loads(r.stdout)['format']['duration'])
-
     if clip_dur >= duration:
-        # Trim
         subprocess.run([
             'ffmpeg','-i', src,'-t', str(duration),
             '-c:v','libx264','-crf','18','-preset','fast',
             '-pix_fmt','yuv420p', dst, '-y'
         ], capture_output=True, check=True)
     else:
-        # Loop to fill
         loops = math.ceil(duration / clip_dur)
         subprocess.run([
-            'ffmpeg',
-            '-stream_loop', str(loops),
-            '-i', src,
+            'ffmpeg','-stream_loop', str(loops),'-i', src,
             '-t', str(duration),
             '-c:v','libx264','-crf','18','-preset','fast',
             '-pix_fmt','yuv420p', dst, '-y'
         ], capture_output=True, check=True)
 
-print(f"🎬  Generating {len(scenes)} video clips ...\\n{'='*65}")
+print(f"Generating {len(scenes)} video clips (CogVideoX-2B) ...\\n{'='*65}")
 clip_paths = []
 t0 = time.time()
 
 for i, (scene, dur) in enumerate(zip(scenes, durations)):
     raw   = f'/content/dark_files/clips/clip_{i:03d}_raw.mp4'
     final = f'/content/dark_files/clips/clip_{i:03d}.mp4'
-    prompt, neg = make_prompt(scene)
-    n_frames    = valid_frames(dur)
+    prompt, _ = make_prompt(scene)
 
-    print(f"\\n🎥  Clip {i+1}/{len(scenes)}  ({dur:.1f}s | {n_frames} frames)")
+    print(f"\\nClip {i+1}/{len(scenes)}  ({dur:.1f}s)")
     print(f"    {prompt[:85]}...")
 
     t1 = time.time()
-    gen_clip(prompt, neg, n_frames, raw, seed=i * 17 + 42)
+    gen_clip(prompt, raw, seed=i * 17 + 42)
     trim_to_duration(raw, final, dur)
     clip_paths.append(final)
 
     elapsed = time.time() - t1
     done    = i + 1
     eta     = (time.time() - t0) / done * (len(scenes) - done)
-    print(f"    ✅  {elapsed:.0f}s  |  ETA: ~{eta/60:.0f} min remaining")
+    print(f"    Done: {elapsed:.0f}s  |  ETA: ~{eta/60:.0f} min remaining")
 
-print(f"\\n✅  All clips generated!  Total: {(time.time()-t0)/60:.1f} min")
+print(f"\\nAll clips generated! Total: {(time.time()-t0)/60:.1f} min")
 """)
 
 CELL_MUSIC = code("""\
