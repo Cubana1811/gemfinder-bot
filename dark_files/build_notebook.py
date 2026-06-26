@@ -200,68 +200,78 @@ CELL_PARSER = code("""\
 
 # ── Dark Files visual prompt database ───────────────────────────
 DARK_AESTHETIC = (
-    "dark atmospheric cinematography, cold desaturated blue color palette, "
-    "dramatic noir low-key lighting, deep crushed shadows, film grain texture, "
-    "documentary thriller style, cinematic 16:9 widescreen, "
-    "mysterious haunting atmosphere, ultra realistic, photorealistic, "
-    "high contrast, professional cinematography"
+    "cinematic documentary photography, moody blue-teal color grading, "
+    "dramatic chiaroscuro lighting, sharp detailed focus, rich shadows with visible detail, "
+    "professional cinematography, photorealistic, ultra detailed, "
+    "atmospheric depth, 8k quality, award winning photography"
 )
 
 DARK_NEGATIVE = (
-    "bright sunny day, colorful cheerful, cartoon, animated, illustration, "
+    "cartoon, animated, illustration, painting, drawing, sketch, "
     "blurry, low quality, distorted, watermark, text overlay, logo, nsfw, "
-    "happy atmosphere, over-exposed, white background, daytime"
+    "oversaturated, overexposed, washed out, flat lighting, stock photo look, "
+    "duplicate, deformed, ugly, bad anatomy"
 )
 
 VISUAL_MAP = [
+    (r'pilot|cockpit|cessna|aviator|flying|took off|takeoff|altitude|feet',
+     'dramatic cockpit interior at night, young pilot silhouetted against dark sky, glowing instrument panel dials in blue and amber, moonlight streaming through windscreen, atmospheric depth'),
+    (r'radio|transmission|signal|contact|broadcast|frequency|transmit|microphone',
+     'vintage radio control equipment in a dark room, glowing frequency dials, waveform on oscilloscope screen, single dramatic spotlight, deep shadows'),
+    (r'air.?traffic|controller|tower|radar|robey|melbourne',
+     'air traffic control tower at night, green radar screen glowing, lone controller silhouetted against multiple screens, tense atmosphere'),
+    (r'metallic|scraping|sound|noise|interference|silence|static',
+     'close-up of audio recording equipment with waveform display, eerie green glow, dark room, reel-to-reel tape recorder, sinister atmosphere'),
+    (r'search|rescue|vessel|coastguard|aircraft.*search|search.*aircraft',
+     'coastguard search vessels on dark open ocean at night, powerful searchlights cutting through thick fog, dramatic wide cinematic shot'),
+    (r'photograph|photo|camera|image|picture|manifold',
+     'close-up of old classified photographs on a dark wooden desk, dramatic side lighting, magnifying glass, redaction marks, mysterious atmosphere'),
+    (r'ocean|sea|bass strait|water|coast|strait|overwater',
+     'vast dark ocean at night under stormy sky, moonlight reflecting on turbulent water surface, dramatic wide angle, ominous atmosphere'),
     (r'forest|woods|trees|woodland',
-     'dark misty forest at night, fog between ancient trees, faint moonlight'),
+     'dark misty forest at night, thick fog drifting between ancient trees, single shaft of cold moonlight, deep atmospheric shadows'),
     (r'facility|complex|plant|factory|warehouse',
-     'abandoned industrial facility at dusk, chain-link fence, security floodlights, concrete'),
+     'abandoned industrial facility at dusk, chain-link fence with security floodlights, concrete walls, ominous atmosphere'),
     (r'laborator|lab|research|scientist',
-     'dark sterile government laboratory corridor, sealed blast doors, cold fluorescent light'),
-    (r'city|town|street|urban|neighborhood',
-     'dark rain-slicked city street at night, distant neon reflections, empty pavement'),
-    (r'ocean|sea|river|lake|water|coast',
-     'dark turbulent water surface at night, storm clouds, cold dramatic moonlight'),
+     'dark sterile government laboratory corridor, sealed blast doors, cold blue fluorescent light, classified research environment'),
+    (r'city|town|street|urban|neighborhood|melbourne',
+     'dark rain-slicked city street at night, distant neon reflections on wet pavement, atmospheric fog, cinematic mood'),
     (r'desert|nevada|arizona|wasteland|remote|plains',
-     'remote desert landscape at dusk, dramatic storm clouds building, desolate empty road'),
+     'remote desert landscape at dusk, dramatic storm clouds building on horizon, desolate empty road, cinematic wide shot'),
     (r'prison|jail|detention|cell|incarcerat',
-     'dark prison corridor at night, harsh single overhead light, iron bars casting long shadows'),
+     'dark prison corridor at night, harsh single overhead light, iron bars casting long dramatic shadows'),
     (r'courtroom|trial|judge|lawyer|testimony|verdict',
-     'dark courtroom interior, single overhead spotlight on witness stand, wooden benches, tension'),
-    (r'church|chapel|cathedral|cemetery|grave|tombstone',
-     'gothic fog-covered cemetery at midnight, crumbling headstones, cold moonlight through clouds'),
+     'dark courtroom interior, single overhead spotlight on witness stand, wooden benches in deep shadow, tense atmosphere'),
+    (r'cemetery|grave|tombstone|burial',
+     'gothic fog-covered cemetery at midnight, crumbling headstones, cold moonlight through storm clouds'),
     (r'hospital|medical|morgue|autopsy|clinic',
-     'abandoned hospital corridor, flickering fluorescent lights, peeling walls, cold sterile blue'),
+     'abandoned hospital corridor, flickering fluorescent light, peeling walls, cold sterile blue atmosphere'),
     (r'police|detective|investig|crime scene|sheriff',
-     'crime scene at night, yellow police tape in the wind, distant red-blue police lights in fog'),
-    (r'document|file|report|classif|declassif|evidence|record',
-     'close-up of classified government documents on a table, dramatic side-lighting, heavy black redactions'),
-    (r'disappear|vanish|missing|abduct|gone',
-     'empty dark room, single overturned chair, door ajar, single dim bulb swinging, eerie silence'),
-    (r'government|military|pentagon|CIA|FBI|NSA|agency|federal|intelligence',
-     'imposing government building at night, surveillance cameras, concrete facade, distant floodlights'),
-    (r'witness|survivor|victim|family|mother|father|child|brother|sister',
-     'shadowy silhouette of a person standing at a dark window at night, back-lit, motionless'),
-    (r'secret|hidden|cover|buried|suppress|conceal',
-     'heavy vault door in darkness, single flashlight beam, rusted locks, deep shadows'),
-    (r'helicopter|aircraft|military aircraft|jet|plane',
-     'military helicopters flying at night with search beams, dark overcast sky, rotor motion blur'),
+     'crime scene at night, yellow police tape in the wind, distant red-blue police lights reflecting in fog'),
+    (r'document|file|report|classif|declassif|evidence|record|freedom.?of.?information|foia|sealed',
+     'close-up of classified government documents with heavy black redactions, dramatic side-lighting, dark wooden desk, manila folder'),
+    (r'disappear|vanish|missing|abduct|gone|never.*found|never.*seen',
+     'empty dark room, single overturned chair, door left ajar, single dim bulb swinging gently, eerie silence'),
+    (r'government|military|pentagon|CIA|FBI|NSA|agency|federal|intelligence|department',
+     'imposing government building at night, surveillance cameras visible, concrete brutalist facade, cold distant floodlights'),
+    (r'witness|survivor|victim|family|father|mother|guido',
+     'shadowy silhouette of a lone person standing at a dark window at night, back-lit by cold blue light, motionless'),
+    (r'secret|hidden|cover|buried|suppress|conceal|buried',
+     'heavy vault door in total darkness, single flashlight beam, rusted combination lock, deep impenetrable shadows'),
+    (r'helicopter|military.*aircraft|search.*plane',
+     'military search helicopters flying at night over ocean, powerful search beams cutting through thick fog, dramatic wide shot'),
     (r'phone|call|wiretap|surveillance|listen|intercept',
-     'vintage rotary phone on a dark desk, reel-to-reel recording equipment, sinister single lamp'),
-    (r'newspaper|media|press|headline|journalist|editor|broadcast',
-     'dark newspaper archive room, stacked yellowed papers under a single lamp, vintage film aesthetic'),
-    (r'night|midnight|3.?am|dark|after dark|evening|dusk|dawn',
-     'deep night environment, minimal isolated light sources, heavy fog, mysterious still atmosphere'),
-    (r'road|highway|bridge|tunnel|path|route',
-     'empty dark highway stretching to infinity at night, faint headlights in the distance, fog'),
-    (r'19[0-9]{2}|20[0-2][0-9]|decade|era|century|year',
-     'cinematic historical recreation, period-appropriate environment, dramatic vintage film grain'),
-    (r'body|remains|skeleton|bones|buried|grave',
-     'dark woodland clearing at night, disturbed earth, police forensic flashlights in the dark'),
-    (r'explosion|fire|burn|smoke|destroy|demolish',
-     'smoldering ruins at night, distant flames reflecting on wet ground, emergency lights in smoke'),
+     'vintage rotary phone on a dark desk, reel-to-reel wiretap recording equipment, sinister single desk lamp'),
+    (r'newspaper|media|press|headline|journalist|editor',
+     'dark newspaper archive room, stacked yellowed papers under single hanging lamp, vintage noir atmosphere'),
+    (r'night|midnight|dark|evening|dusk|1978|october',
+     'vast dark night sky over still water, distant horizon, cold blue moonlight, ominous atmospheric wide shot'),
+    (r'road|highway|bridge|airport|runway|moorabbin',
+     'empty dark airport runway at night, taxiway lights stretching to infinity, single aircraft silhouette, fog'),
+    (r'body|remains|skeleton|bones|buried',
+     'dark woodland clearing at night, disturbed earth, forensic flashlights in darkness, crime scene atmosphere'),
+    (r'national.?security|classified|sealed|denied|withheld',
+     'top secret stamp on dark document, dramatic red lighting, vault shelf with classified files, shadowy government archive'),
 ]
 
 def parse_scenes(script, max_words=55):
@@ -350,28 +360,28 @@ print(f"⏱️   Total duration: {total_duration:.1f}s  ({total_duration/60:.1f}
 """)
 
 CELL_LOAD_MODEL = code("""\
-# ── STEP 6: Load Stable Diffusion 1.5 image model ───────────────
+# ── STEP 6: Load Stable Diffusion XL image model ────────────────
 #
-#  SD 1.5: ~4 GB download — runs perfectly on free T4 GPU.
-#  Generates one cinematic image per scene; FFmpeg adds
-#  Ken Burns pan/zoom motion to create video clips.
+#  SDXL: ~7 GB download — high quality cinematic images on T4 GPU.
+#  Generates one detailed scene image per paragraph; FFmpeg adds
+#  Ken Burns pan/zoom motion to create smooth video clips.
 # ─────────────────────────────────────────────────────────────────
 import torch
-from diffusers import StableDiffusionPipeline
+from diffusers import StableDiffusionXLPipeline
 
 torch.cuda.empty_cache()
-print("Loading Stable Diffusion 1.5 (~4 GB — first run only, please wait)...\\n")
+print("Loading Stable Diffusion XL (~7 GB — first run only, please wait)...\\n")
 
-pipe = StableDiffusionPipeline.from_pretrained(
-    "runwayml/stable-diffusion-v1-5",
+pipe = StableDiffusionXLPipeline.from_pretrained(
+    "stabilityai/stable-diffusion-xl-base-1.0",
     torch_dtype=torch.float16,
+    variant="fp16",
+    use_safetensors=True,
     cache_dir='/content/dark_files/cache',
-    safety_checker=None,
-    requires_safety_checker=False,
 )
-pipe = pipe.to("cuda")
+pipe.enable_model_cpu_offload()
 
-print(f"\\n✅  Stable Diffusion 1.5 loaded!")
+print(f"\\n✅  Stable Diffusion XL loaded!")
 print(f"    VRAM used: {torch.cuda.memory_allocated()/1e9:.2f} GB / 16 GB")
 """)
 
@@ -397,8 +407,8 @@ def gen_image(prompt, neg, img_path, seed=0):
     img = pipe(
         prompt=prompt,
         negative_prompt=neg,
-        width=768, height=432,
-        num_inference_steps=30,
+        width=1024, height=576,
+        num_inference_steps=25,
         guidance_scale=7.5,
         generator=gen,
     ).images[0]
@@ -410,7 +420,7 @@ def image_to_video(img_path, out_path, duration, effect_idx=0):
     effect = KEN_BURNS[effect_idx % len(KEN_BURNS)]
     subprocess.run([
         'ffmpeg', '-loop', '1', '-i', img_path,
-        '-vf', f"{effect}:d={frames}:s=768x432,fps={fps}",
+        '-vf', f"{effect}:d={frames}:s=1024x576,fps={fps}",
         '-t', str(duration),
         '-c:v', 'libx264', '-crf', '18', '-preset', 'fast',
         '-pix_fmt', 'yuv420p', out_path, '-y'
@@ -556,16 +566,16 @@ print("    → High contrast (1.3)")
 print("    → Subtle film grain")
 
 DARK_FILES_GRADE = ",".join([
-    # Cold blue shift: reduce red slightly, boost blue
-    "colorchannelmixer=rr=0.82:rg=0.01:rb=0.0:gr=0.0:gg=0.88:gb=0.04:br=0.0:bg=0.05:bb=1.1",
-    # S-curve: crush blacks, compress highlights
-    "curves=all='0/0 0.18/0.08 0.5/0.44 0.82/0.72 1/0.87'",
-    # Desaturate + contrast boost + slight darken
-    "eq=saturation=0.65:contrast=1.3:brightness=-0.04:gamma=1.05",
-    # Subtle film grain
-    "noise=alls=3:allf=t+u",
-    # Gentle detail sharpening
-    "unsharp=5:5:0.35:3:3:0.0"
+    # Subtle cold blue teal shift
+    "colorchannelmixer=rr=0.88:rg=0.01:rb=0.0:gr=0.0:gg=0.92:gb=0.03:br=0.0:bg=0.04:bb=1.06",
+    # Gentle S-curve — preserve shadow detail
+    "curves=all='0/0 0.12/0.05 0.5/0.47 0.88/0.82 1/0.94'",
+    # Slight desaturate + mild contrast — keep image visible
+    "eq=saturation=0.78:contrast=1.12:brightness=-0.01:gamma=1.02",
+    # Very subtle film grain — don't overpower the image
+    "noise=alls=1:allf=t+u",
+    # Gentle sharpening
+    "unsharp=5:5:0.3:3:3:0.0"
 ])
 
 video_graded = '/content/dark_files/final/video_graded.mp4'
