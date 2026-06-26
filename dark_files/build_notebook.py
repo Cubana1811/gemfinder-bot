@@ -466,8 +466,10 @@ MUSIC_PROMPT = (
 print("🎵  Generating 30-second dark ambient loop ...")
 music = music_pipe(MUSIC_PROMPT, forward_params={"do_sample": True, "max_new_tokens": 1500})
 
+# Handle both list and dict output formats across transformers versions
+audio_data = music[0] if isinstance(music, list) else music
 raw_wav = '/content/dark_files/audio/music_raw.wav'
-wav.write(raw_wav, music[0]['sampling_rate'], music[0]['audio'].T)
+wav.write(raw_wav, audio_data['sampling_rate'], audio_data['audio'].T)
 
 # Loop to match full video duration + fade out
 music_wav = '/content/dark_files/audio/music_final.wav'
