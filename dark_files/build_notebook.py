@@ -200,78 +200,84 @@ CELL_PARSER = code("""\
 
 # ── Dark Files visual prompt database ───────────────────────────
 DARK_AESTHETIC = (
-    "cinematic documentary photography, moody blue-teal color grading, "
-    "dramatic chiaroscuro lighting, sharp detailed focus, rich shadows with visible detail, "
-    "professional cinematography, photorealistic, ultra detailed, "
-    "atmospheric depth, 8k quality, award winning photography"
+    "award winning cinematic photography, professional Hollywood cinematography, "
+    "dramatic three-point lighting, rich deep colors, sharp crisp focus, "
+    "photorealistic ultra detailed 8k, beautiful atmospheric depth, "
+    "teal and orange color grade, visible shadow detail, "
+    "National Geographic documentary style, stunning visual composition"
 )
 
 DARK_NEGATIVE = (
     "cartoon, animated, illustration, painting, drawing, sketch, "
-    "blurry, low quality, distorted, watermark, text overlay, logo, nsfw, "
-    "oversaturated, overexposed, washed out, flat lighting, stock photo look, "
-    "duplicate, deformed, ugly, bad anatomy"
+    "blurry, out of focus, low quality, distorted, watermark, text overlay, logo, nsfw, "
+    "overexposed, washed out, flat lighting, stock photo, generic, boring, "
+    "duplicate, deformed, ugly, bad anatomy, grainy, noisy, pixelated, "
+    "pitch black, too dark, underexposed, muddy, unclear"
 )
 
 VISUAL_MAP = [
     (r'pilot|cockpit|cessna|aviator|flying|took off|takeoff|altitude|feet',
-     'dramatic cockpit interior at night, young pilot silhouetted against dark sky, glowing instrument panel dials in blue and amber, moonlight streaming through windscreen, atmospheric depth'),
+     'stunning cinematic cockpit interior at dusk, young pilot in uniform with focused expression, beautifully lit instrument panel with amber and blue glowing dials, vast sky visible through windscreen, cinematic depth of field, dramatic side lighting'),
     (r'radio|transmission|signal|contact|broadcast|frequency|transmit|microphone',
-     'vintage radio control equipment in a dark room, glowing frequency dials, waveform on oscilloscope screen, single dramatic spotlight, deep shadows'),
+     'cinematic close-up of vintage 1970s radio equipment, glowing frequency dials in amber and green, audio waveform display, dramatic warm side lighting, rich textures, professional photography'),
     (r'air.?traffic|controller|tower|radar|robey|melbourne',
-     'air traffic control tower at night, green radar screen glowing, lone controller silhouetted against multiple screens, tense atmosphere'),
+     'cinematic air traffic control room at night, multiple glowing radar screens in teal and green, professional controller at workstation, dramatic blue-amber lighting, rich atmospheric depth'),
     (r'metallic|scraping|sound|noise|interference|silence|static',
-     'close-up of audio recording equipment with waveform display, eerie green glow, dark room, reel-to-reel tape recorder, sinister atmosphere'),
+     'cinematic close-up of reel-to-reel tape recorder with audio waveform display, warm amber instrument lighting, dramatic side shadows, rich detailed textures, 1970s professional equipment'),
     (r'search|rescue|vessel|coastguard|aircraft.*search|search.*aircraft',
-     'coastguard search vessels on dark open ocean at night, powerful searchlights cutting through thick fog, dramatic wide cinematic shot'),
+     'dramatic cinematic wide shot of coastguard search vessel on vast open ocean at sunset, powerful searchlights, golden and teal water reflections, breathtaking atmospheric photography'),
     (r'photograph|photo|camera|image|picture|manifold',
-     'close-up of old classified photographs on a dark wooden desk, dramatic side lighting, magnifying glass, redaction marks, mysterious atmosphere'),
+     'cinematic close-up of old classified photographs spread on a wooden desk, dramatic warm side lighting, magnifying glass, visible film grain texture on photos, rich vintage atmosphere'),
     (r'ocean|sea|bass strait|water|coast|strait|overwater',
-     'vast dark ocean at night under stormy sky, moonlight reflecting on turbulent water surface, dramatic wide angle, ominous atmosphere'),
+     'breathtaking cinematic wide shot of vast ocean at dusk, dramatic golden-teal sky reflected on water surface, storm clouds building on horizon, stunning atmospheric photography'),
     (r'forest|woods|trees|woodland',
-     'dark misty forest at night, thick fog drifting between ancient trees, single shaft of cold moonlight, deep atmospheric shadows'),
+     'stunning cinematic forest scene, shafts of golden light through ancient tall trees, beautiful atmospheric mist between trunks, rich green and amber tones, breathtaking nature photography'),
     (r'facility|complex|plant|factory|warehouse',
-     'abandoned industrial facility at dusk, chain-link fence with security floodlights, concrete walls, ominous atmosphere'),
+     'cinematic wide shot of industrial facility at dramatic dusk, warm orange sunset behind steel structures, security lighting, rich orange-teal color contrast, architectural photography'),
     (r'laborator|lab|research|scientist',
-     'dark sterile government laboratory corridor, sealed blast doors, cold blue fluorescent light, classified research environment'),
+     'cinematic government laboratory interior, clean white sterile environment, dramatic blue fluorescent lighting, scientist silhouette at equipment, rich color contrast, professional photography'),
     (r'city|town|street|urban|neighborhood|melbourne',
-     'dark rain-slicked city street at night, distant neon reflections on wet pavement, atmospheric fog, cinematic mood'),
+     'stunning cinematic city street at blue hour, rain-wet pavement reflecting neon signs in amber and teal, beautiful bokeh lights in background, dramatic atmospheric photography'),
     (r'desert|nevada|arizona|wasteland|remote|plains',
-     'remote desert landscape at dusk, dramatic storm clouds building on horizon, desolate empty road, cinematic wide shot'),
+     'breathtaking cinematic desert landscape at golden hour, dramatic clouds casting long shadows, desolate road to horizon, rich warm orange and purple tones, stunning wide shot'),
     (r'prison|jail|detention|cell|incarcerat',
-     'dark prison corridor at night, harsh single overhead light, iron bars casting long dramatic shadows'),
+     'cinematic prison corridor with dramatic lighting, iron bars casting long geometric shadows, warm overhead light contrasting with cool blue shadows, rich architectural photography'),
     (r'courtroom|trial|judge|lawyer|testimony|verdict',
-     'dark courtroom interior, single overhead spotlight on witness stand, wooden benches in deep shadow, tense atmosphere'),
+     'dramatic cinematic courtroom interior, oak paneling, warm overhead spotlights on witness stand, beautiful architectural details, rich amber and shadow contrast, atmospheric photography'),
     (r'cemetery|grave|tombstone|burial',
-     'gothic fog-covered cemetery at midnight, crumbling headstones, cold moonlight through storm clouds'),
+     'cinematic cemetery at dramatic blue hour, beautiful old stone monuments, mist rolling between headstones, rich teal and amber light, atmospheric documentary photography'),
     (r'hospital|medical|morgue|autopsy|clinic',
-     'abandoned hospital corridor, flickering fluorescent light, peeling walls, cold sterile blue atmosphere'),
+     'cinematic hospital corridor, dramatic perspective with vanishing point, fluorescent blue-white lighting, reflective floors, atmospheric depth, professional architectural photography'),
     (r'police|detective|investig|crime scene|sheriff',
-     'crime scene at night, yellow police tape in the wind, distant red-blue police lights reflecting in fog'),
+     'cinematic crime scene photograph, dramatic yellow tape against dark background, red-blue police lights reflecting on wet pavement, atmospheric depth, professional documentary photography'),
     (r'document|file|report|classif|declassif|evidence|record|freedom.?of.?information|foia|sealed',
-     'close-up of classified government documents with heavy black redactions, dramatic side-lighting, dark wooden desk, manila folder'),
+     'stunning cinematic close-up of declassified documents with redacted black lines, dramatic warm side lighting, rich paper texture, wooden desk surface, atmospheric documentary style'),
     (r'disappear|vanish|missing|abduct|gone|never.*found|never.*seen',
-     'empty dark room, single overturned chair, door left ajar, single dim bulb swinging gently, eerie silence'),
+     'cinematic empty room with dramatic single window light, overturned chair casting long shadow, beautiful atmospheric dust particles in light beam, rich contrast, haunting composition'),
     (r'government|military|pentagon|CIA|FBI|NSA|agency|federal|intelligence|department',
-     'imposing government building at night, surveillance cameras visible, concrete brutalist facade, cold distant floodlights'),
+     'dramatic cinematic wide shot of imposing government building at dawn, beautiful warm light on stone facade, symmetrical architectural composition, rich teal sky, stunning photography'),
     (r'witness|survivor|victim|family|father|mother|guido',
-     'shadowy silhouette of a lone person standing at a dark window at night, back-lit by cold blue light, motionless'),
-    (r'secret|hidden|cover|buried|suppress|conceal|buried',
-     'heavy vault door in total darkness, single flashlight beam, rusted combination lock, deep impenetrable shadows'),
+     'cinematic portrait silhouette of person at large window, beautiful blue-hour light from outside, rich rim lighting, thoughtful composition, atmospheric documentary photography'),
+    (r'secret|hidden|cover|buried|suppress|conceal',
+     'cinematic close-up of heavy vault or safe door, dramatic warm side lighting, rich metal textures, combination lock detail, beautiful chiaroscuro shadows, professional photography'),
     (r'helicopter|military.*aircraft|search.*plane',
-     'military search helicopters flying at night over ocean, powerful search beams cutting through thick fog, dramatic wide shot'),
+     'dramatic cinematic shot of helicopter silhouetted against stunning sunset sky, rotor blur, rich orange and purple clouds, breathtaking wide angle, professional aviation photography'),
     (r'phone|call|wiretap|surveillance|listen|intercept',
-     'vintage rotary phone on a dark desk, reel-to-reel wiretap recording equipment, sinister single desk lamp'),
+     'cinematic close-up of vintage rotary telephone on dark wooden desk, warm amber desk lamp, beautiful shallow depth of field, rich textures, 1970s atmospheric photography'),
     (r'newspaper|media|press|headline|journalist|editor',
-     'dark newspaper archive room, stacked yellowed papers under single hanging lamp, vintage noir atmosphere'),
+     'cinematic newspaper archive, stacked yellowed papers with visible headlines, warm single lamp overhead, beautiful vintage atmosphere, rich amber tones, documentary photography'),
     (r'night|midnight|dark|evening|dusk|1978|october',
-     'vast dark night sky over still water, distant horizon, cold blue moonlight, ominous atmospheric wide shot'),
+     'breathtaking cinematic night sky full of stars over calm water, milky way reflection, rich blue and silver tones, stunning astrophotography style, dramatic atmospheric wide shot'),
     (r'road|highway|bridge|airport|runway|moorabbin',
-     'empty dark airport runway at night, taxiway lights stretching to infinity, single aircraft silhouette, fog'),
+     'stunning cinematic airport runway at blue hour, perspective lines of runway lights stretching to horizon, dramatic teal sky, aircraft silhouette, beautiful aviation photography'),
     (r'body|remains|skeleton|bones|buried',
-     'dark woodland clearing at night, disturbed earth, forensic flashlights in darkness, crime scene atmosphere'),
+     'cinematic forensic scene at dusk, professional lighting equipment casting warm glow, evidence markers, dramatic atmospheric photography, rich color contrast'),
     (r'national.?security|classified|sealed|denied|withheld',
-     'top secret stamp on dark document, dramatic red lighting, vault shelf with classified files, shadowy government archive'),
+     'dramatic cinematic close-up of TOP SECRET stamp on document, rich red ink on aged paper, warm dramatic side lighting, beautiful depth of field, atmospheric documentary photography'),
+    (r'search.*four|four.*day|called.*off|terminated|abandoned',
+     'cinematic wide shot of empty ocean horizon at dawn, search vessel turning back, dramatic golden light, vast scale of ocean, heartbreaking beautiful composition'),
+    (r'transcript|words|said|spoke|voice|last.*word',
+     'cinematic close-up of typed transcript paper, individual words in sharp focus, warm side lighting, dramatic shadow from page edge, rich texture detail, documentary photography'),
 ]
 
 def parse_scenes(script, max_words=55):
@@ -566,16 +572,16 @@ print("    → High contrast (1.3)")
 print("    → Subtle film grain")
 
 DARK_FILES_GRADE = ",".join([
-    # Subtle cold blue teal shift
-    "colorchannelmixer=rr=0.88:rg=0.01:rb=0.0:gr=0.0:gg=0.92:gb=0.03:br=0.0:bg=0.04:bb=1.06",
-    # Gentle S-curve — preserve shadow detail
-    "curves=all='0/0 0.12/0.05 0.5/0.47 0.88/0.82 1/0.94'",
-    # Slight desaturate + mild contrast — keep image visible
-    "eq=saturation=0.78:contrast=1.12:brightness=-0.01:gamma=1.02",
-    # Very subtle film grain — don't overpower the image
-    "noise=alls=1:allf=t+u",
-    # Gentle sharpening
-    "unsharp=5:5:0.3:3:3:0.0"
+    # Hollywood teal-orange look: teal in shadows, warm in highlights
+    "colorchannelmixer=rr=1.02:rg=0.0:rb=-0.02:gr=-0.01:gg=0.98:gb=0.03:br=-0.02:bg=0.05:bb=1.0",
+    # Lift blacks slightly (cinematic) + gentle S-curve
+    "curves=r='0/0.02 0.5/0.52 1/0.98':g='0/0.01 0.5/0.50 1/0.99':b='0/0.03 0.5/0.51 1/0.97'",
+    # Slight saturation boost, gentle contrast — keep it vivid and beautiful
+    "eq=saturation=1.05:contrast=1.08:brightness=0.0:gamma=1.0",
+    # Barely-there film grain — just enough for texture
+    "noise=alls=1:allf=t",
+    # Gentle sharpening for crisp detail
+    "unsharp=5:5:0.4:3:3:0.0"
 ])
 
 video_graded = '/content/dark_files/final/video_graded.mp4'
