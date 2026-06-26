@@ -720,34 +720,53 @@ print(f"{'='*55}")
 """)
 
 CELL_DOWNLOAD = code("""\
-# ── STEP 13: Preview + download ──────────────────────────────────
+# ── STEP 13: Save to Google Drive + download ─────────────────────
 
-print("🎬  Loading preview ...\\n")
-display(Video(final_video, width=704, height=480, embed=True))
+import os, shutil
+from IPython.display import Video, display
+from google.colab import files as colab_files
 
-print("\\n📥  Downloading your Dark Files video ...")
-if IN_COLAB:
-    colab_files.download(final_video)
-else:
-    print(f"   File saved at: {final_video}")
+# ── Mount Google Drive and save a permanent copy ─────────────────
+try:
+    from google.colab import drive
+    drive.mount('/content/drive', force_remount=False)
+    drive_folder = '/content/drive/MyDrive/DarkFiles'
+    os.makedirs(drive_folder, exist_ok=True)
+    safe_title = re.sub(r'[^\\w\\s-]', '', EPISODE_TITLE).strip().replace(' ', '_')
+    drive_path  = f'{drive_folder}/DARK_FILES_{safe_title}.mp4'
+    shutil.copy2(final_video, drive_path)
+    print(f"Saved to Google Drive: DarkFiles/DARK_FILES_{safe_title}.mp4")
+    print("Your video is safe — even if Colab disconnects.")
+except Exception as e:
+    print(f"Drive save skipped: {e}")
+
+# ── Preview ──────────────────────────────────────────────────────
+print("\\nLoading preview ...\\n")
+try:
+    display(Video(final_video, width=1024, height=576, embed=True))
+except Exception:
+    pass
+
+# ── Download to your computer ────────────────────────────────────
+print("\\nDownloading your Dark Files video to your computer ...")
+colab_files.download(final_video)
 
 print(\"\"\"
-✅  YOUR VIDEO IS READY FOR YOUTUBE
+YOUR VIDEO IS READY FOR YOUTUBE
 
-YouTube Upload Checklist:
-  ✅  MP4 container  (H.264 + AAC)
-  ✅  16:9 aspect ratio
-  ✅  25 fps
-  ✅  192 kbps stereo audio
-  ✅  Synced captions burned in
-  ✅  Dark Files cinematic color grade
-  ✅  Professional neural voiceover
-  ✅  Dark ambient background music (royalty-free)
+  MP4 container (H.264 + AAC)
+  16:9 aspect ratio  |  25 fps  |  192 kbps audio
+  Professional neural voiceover
+  Cinematic color grade
+  Dark ambient background music (royalty-free)
 
-💡  Pro tips after upload:
-  • Add a custom thumbnail in YouTube Studio
-  • Paste your script as the video description for SEO
-  • Add chapter markers manually for longer episodes
+Your video is also saved permanently in Google Drive
+under My Drive > DarkFiles
+
+Pro tips after upload:
+  - Add the thumbnail you generated in YouTube Studio
+  - Paste the SEO description and tags
+  - Add chapter markers for longer episodes
 \"\"\")
 """)
 
