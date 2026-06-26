@@ -9,30 +9,63 @@ import json, os
 def md(src): return {"cell_type":"markdown","metadata":{},"source":src}
 def code(src): return {"cell_type":"code","execution_count":None,"metadata":{},"outputs":[],"source":src}
 
+# Load trend cell from separate file to avoid nested quote / emoji encoding issues
+_HERE = os.path.dirname(__file__)
+with open(os.path.join(_HERE, 'trend_cell.py'), 'r', encoding='utf-8') as _f:
+    _TREND_SRC = _f.read()
+
 # ── CELLS ──────────────────────────────────────────────────────────────────────
 
 CELL_TITLE = md("""\
-# 🎬 DARK FILES — Automated YouTube Video Generator
+# 🎬 DARK FILES — Complete YouTube Production System
 ### True Crime · Classified Secrets · Dark Chapters of History
 ---
-**What this notebook does — completely free, zero cost:**
-- Splits your script into scenes
-- Generates **realistic motion video** per scene (LTX-Video, open-source)
-- Generates **professional voiceover** (Microsoft Edge neural TTS)
-- Generates **dark ambient background music** (Meta MusicGen)
-- Adds **cinematic crossfade transitions**
-- Burns in **synced captions**
-- Applies **Dark Files cinematic color grade** (cold blue, crushed blacks, film grain)
-- Exports a single YouTube-ready **MP4**
+**This notebook has TWO systems — both completely free:**
+
+**🔍 SYSTEM 1 — Trend Intelligence (Run first)**
+- Scans Google Trends, YouTube & Reddit simultaneously
+- Finds what people are actively searching right now
+- Scores each topic by opportunity (high demand, low competition)
+- Detects the unique angle nobody has covered
+- Generates complete metadata: titles, description, tags, thumbnail text
+
+**🎬 SYSTEM 2 — Video Generator (After you have your script)**
+- Generates realistic motion video per scene (LTX-Video)
+- Professional deep voiceover (Microsoft Edge neural TTS)
+- Dark ambient background music (Meta MusicGen)
+- Cinematic fade transitions + synced captions
+- Dark Files color grade (cold blue, crushed blacks, film grain)
+- Exports YouTube-ready MP4
 
 ---
 ### ⚡ Before you start
 1. Click **Runtime → Change runtime type → T4 GPU → Save**
-2. **Run cells in order** — do not skip
-3. **Only edit Cell 5** — paste your script there, everything else is automatic
+2. **Run System 1 first** to find your episode topic
+3. **Research the unique angle** using Claude
+4. **Paste your script into Cell 8** and run System 2
 
-> ⏱️ Estimated time: ~2–5 min per scene on free T4 GPU
+> ⏱️ Trend scan: ~3 min | Video generation: ~30–50 min on free T4 GPU
 """)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SYSTEM 1: TREND INTELLIGENCE
+# ─────────────────────────────────────────────────────────────────────────────
+
+CELL_TREND_INSTALL = code("""\
+# ── SYSTEM 1 · STEP 1: Install Trend Intelligence packages ───────
+import subprocess
+print("📦  Installing Trend Intelligence packages...")
+subprocess.run(['pip', 'install', '-q',
+    'pytrends',
+    'youtube-search-python',
+    'requests',
+    'beautifulsoup4',
+], check=True)
+print("✅  Done!")
+""")
+
+CELL_TREND_INTELLIGENCE = code(_TREND_SRC)
+
 
 CELL_GPU = code("""\
 # ── STEP 0: Verify GPU ──────────────────────────────────────────
@@ -283,19 +316,13 @@ print(f"⏳  Estimated generation time on T4: {len(scenes)*3:.0f}–{len(scenes)
 
 CELL_VOICEOVER = code("""\
 # ── STEP 5: Generate voiceover + caption timing ──────────────────
+import nest_asyncio
+nest_asyncio.apply()
 import edge_tts, asyncio, json, subprocess
 
-async def gen_voice(text, voice, rate, pitch, audio_out, vtt_out):
-    com = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
-    sub = edge_tts.SubMaker()
-    with open(audio_out, 'wb') as af:
-        async for chunk in com.stream():
-            if chunk['type'] == 'audio':
-                af.write(chunk['data'])
-            elif chunk['type'] == 'WordBoundary':
-                sub.create_sub(chunk['offset'], chunk['duration'], chunk['text'])
-    with open(vtt_out, 'w', encoding='utf-8') as sf:
-        sf.write(sub.generate_subs())
+async def gen_voice_simple(text, voice, rate, pitch, audio_out):
+    communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+    await communicate.save(audio_out)
 
 def audio_dur(path):
     r = subprocess.run(
@@ -310,8 +337,10 @@ audio_paths, vtt_paths, durations = [], [], []
 for i, scene in enumerate(scenes):
     ap = f'/content/dark_files/audio/scene_{i:03d}.mp3'
     vp = f'/content/dark_files/audio/scene_{i:03d}.vtt'
-    asyncio.run(gen_voice(scene, VOICE, SPEAKING_RATE, SPEAKING_PITCH, ap, vp))
+    asyncio.run(gen_voice_simple(scene, VOICE, SPEAKING_RATE, SPEAKING_PITCH, ap))
     d = audio_dur(ap)
+    with open(vp, 'w') as f:
+        f.write(f"WEBVTT\\n\\n00:00.000 --> {int(d//60):02d}:{d%60:06.3f}\\n{scene}\\n\\n")
     audio_paths.append(ap); vtt_paths.append(vp); durations.append(d)
     print(f"  ✅  Scene {i+1}/{len(scenes)}: {d:.2f}s  |  {scene[:55]}...")
 
@@ -730,11 +759,15 @@ notebook = {
         "colab": {
             "provenance": [],
             "gpuType": "T4",
-            "name": "Dark Files Video Generator"
+            "name": "Dark Files — Complete YouTube Production System"
         }
     },
     "cells": [
+        # ── System 1: Trend Intelligence ──────────────────────────
         CELL_TITLE,
+        CELL_TREND_INSTALL,
+        CELL_TREND_INTELLIGENCE,
+        # ── System 2: Video Generator ─────────────────────────────
         CELL_GPU,
         CELL_INSTALL,
         CELL_IMPORTS,
