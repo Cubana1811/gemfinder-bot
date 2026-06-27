@@ -7,12 +7,12 @@ from telegram import Bot
 from datetime import datetime, timezone
 # trigger redeploy 2
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHAT_ID          = os.environ.get("CHAT_ID",        "YOUR_CHAT_ID_HERE")
 
 SCAN_INTERVAL    = 90
-GEM_THRESHOLD    = 72
+GEM_THRESHOLD    = 60
 MAX_MCAP         = 2_000_000
 MIN_LIQUIDITY    = 10_000
 SIGNAL_COOLDOWN  = 3600
@@ -20,7 +20,7 @@ SIGNAL_COOLDOWN  = 3600
 DS_BASE          = "https://api.dexscreener.com"
 HL_API           = "https://api.hyperliquid.xyz/info"
 FEAR_GREED_URL   = "https://api.alternative.me/fng/?limit=1"
-BTC_URL          = "https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT"
+BTC_URL          = "https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT"
 RUGCHECK_BASE    = "https://api.rugcheck.xyz/v1"
 BIRDEYE_BASE     = "https://public-api.birdeye.so"
 PUMP_API         = "https://frontend-api.pump.fun"
@@ -68,9 +68,11 @@ def fetch_market_context():
     if fg and fg.get("data"):
         ctx["fear_greed"] = int(fg["data"][0].get("value", 50))
     btc = get(BTC_URL)
-    if btc:
-        ctx["btc_chg"]   = float(btc.get("priceChangePercent", 0))
-        ctx["btc_price"] = float(btc.get("lastPrice", 0))
+    if btc and btc.get("retCode") == 0:
+        tickers = btc.get("result", {}).get("list", [])
+        if tickers:
+            ctx["btc_chg"]   = float(tickers[0].get("price24hPcnt", 0)) * 100
+            ctx["btc_price"] = float(tickers[0].get("lastPrice", 0))
     fg_val = ctx["fear_greed"]
     if fg_val < 20:   ctx["market_phase"] = "EXTREME_FEAR"
     elif fg_val < 40: ctx["market_phase"] = "FEAR"

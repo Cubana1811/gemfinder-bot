@@ -21,7 +21,7 @@ from telegram import Bot
 
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHAT_ID         = os.environ.get("CHAT_ID", "YOUR_CHAT_ID_HERE")
-BINANCE_BASE    = "https://fapi.binance.com"
+BYBIT_BASE      = "https://api.bybit.com"
 FEAR_GREED_URL  = "https://api.alternative.me/fng/?limit=1"
 REGIME_FILE     = "regime.json"
 CHECK_INTERVAL  = 60   # check every 60 seconds if it's time to run
@@ -29,7 +29,7 @@ CHECK_INTERVAL  = 60   # check every 60 seconds if it's time to run
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────────────────
 
 def safe_get(url, timeout=15):
     try:
@@ -40,9 +40,16 @@ def safe_get(url, timeout=15):
         log.warning("HTTP %s: %s" % (url[:55], e))
     return None
 
+INTERVAL_MAP = {"1d": "D", "1w": "W", "4h": "240", "1h": "60", "15m": "15"}
+
 def fetch_klines(symbol, interval, limit):
-    return safe_get("%s/fapi/v1/klines?symbol=%s&interval=%s&limit=%s" % (
-        BINANCE_BASE, symbol, interval, limit)) or []
+    bybit_interval = INTERVAL_MAP.get(interval, interval)
+    data = safe_get("%s/v5/market/kline?category=linear&symbol=%s&interval=%s&limit=%s" % (
+        BYBIT_BASE, symbol, bybit_interval, limit))
+    if data and data.get("retCode") == 0:
+        candles = list(reversed(data["result"]["list"]))
+        return candles
+    return []
 
 def fetch_fear_greed():
     data = safe_get(FEAR_GREED_URL)
@@ -51,9 +58,12 @@ def fetch_fear_greed():
     return 50
 
 def fetch_funding(symbol):
-    data = safe_get("%s/fapi/v1/fundingRate?symbol=%s&limit=1" % (BINANCE_BASE, symbol))
-    if data:
-        return float(data[-1].get("fundingRate", 0)) * 100
+    data = safe_get("%s/v5/market/funding/history?category=linear&symbol=%s&limit=1" % (
+        BYBIT_BASE, symbol))
+    if data and data.get("retCode") == 0:
+        entries = data["result"]["list"]
+        if entries:
+            return float(entries[0].get("fundingRate", 0)) * 100
     return 0.0
 
 def ema(closes, period):
@@ -94,7 +104,7 @@ def load_regime():
     except Exception:
         return {"regime": "BULL", "updated": ""}
 
-# ── Regime analyser ───────────────────────────────────────────────────────────
+# ── Regime analyser ─────────────────────────────────────────────────────────────────────────
 
 def analyse_regime():
     """
@@ -105,7 +115,7 @@ def analyse_regime():
     bear_score = 0
     details    = {}
 
-    # ── BTC daily analysis ────────────────────────────────────────────────────
+    # ── BTC daily analysis ────────────────────────────────────────────────────────────────────────────
     btc_1d = fetch_klines("BTCUSDT", "1d", 60)
     btc_1w = fetch_klines("BTCUSDT", "1w", 20)
     time.sleep(0.2)
@@ -161,7 +171,7 @@ def analyse_regime():
             elif change_30d < -3:
                 bear_score += 1
 
-    # ── Weekly trend ──────────────────────────────────────────────────────────
+    # ── Weekly trend ─────────────────────────────────────────────────────────────────────────────
     if btc_1w:
         c1w      = parse_closes(btc_1w)
         ema10_1w = ema(c1w, min(10, len(c1w)))
@@ -179,7 +189,7 @@ def analyse_regime():
         else:
             details["weekly_trend"] = "MIXED"
 
-    # ── ETH confirmation ──────────────────────────────────────────────────────
+    # ── ETH confirmation ────────────────────────────────────────────────────────────────────────────
     eth_1d = fetch_klines("ETHUSDT", "1d", 60)
     time.sleep(0.2)
 
@@ -198,7 +208,7 @@ def analyse_regime():
             bear_score += 1
             details["eth_signal"] = "BELOW EMA200 (bearish)"
 
-    # ── Fear & Greed ──────────────────────────────────────────────────────────
+    # ── Fear & Greed ────────────────────────────────────────────────────────────────────────────
     fgi = fetch_fear_greed()
     details["fear_greed"] = fgi
 
@@ -214,7 +224,7 @@ def analyse_regime():
     else:
         details["fgi_signal"] = "NEUTRAL (%d)" % fgi
 
-    # ── BTC funding rate ──────────────────────────────────────────────────────
+    # ── BTC funding rate ────────────────────────────────────────────────────────────────────────────
     btc_funding = fetch_funding("BTCUSDT")
     details["btc_funding"] = btc_funding
 
@@ -228,7 +238,7 @@ def analyse_regime():
         bull_score += 1
         details["funding_signal"] = "SHORTS PAYING LONGS (%.3f%%)" % btc_funding
 
-    # ── Determine regime ──────────────────────────────────────────────────────
+    # ── Determine regime ────────────────────────────────────────────────────────────────────────────
     total = bull_score + bear_score
     bull_pct = bull_score / total * 100 if total > 0 else 50
 
@@ -249,7 +259,7 @@ def analyse_regime():
 
     return regime, strength, details
 
-# ── Morning briefing builder ──────────────────────────────────────────────────
+# ── Morning briefing builder ──────────────────────────────────────────────────────────────────
 
 def build_briefing(regime, strength, d):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -314,7 +324,7 @@ def build_briefing(regime, strength, d):
         d.get("bull_pct", 50),
     )
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
+# ── Main loop ────────────────────────────────────────────────────────────────────────────────
 
 async def main():
     log.info("Market Regime Detector starting...")
