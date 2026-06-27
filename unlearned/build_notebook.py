@@ -513,8 +513,7 @@ print("\\n✅ Animation rendered. Run Cell 7.")
 
 CELL_MUSIC = code('''\
 # ══ CELL 7: Generate Background Music ════════════════════════════════════════
-import numpy as np
-from scipy.io import wavfile
+import numpy as np, wave, struct, os, subprocess
 
 if "SCENE_DATA" not in dir():
     import json
@@ -548,12 +547,18 @@ _fo = min(int(SR * 7.0), len(mix) // 4)
 mix[:_fi]  *= np.linspace(0, 1, _fi)
 mix[-_fo:] *= np.linspace(1, 0, _fo)
 
+# Write WAV with built-in wave module — no scipy needed
 _wav  = f\'{WORK_DIR}/ambient_music.wav\'
 MUSIC_MP3 = f\'{WORK_DIR}/ambient_music.mp3\'
-wavfile.write(_wav, SR, mix.astype(np.float32))
+_pcm = (mix * 32767).astype(np.int16)
+with wave.open(_wav, \'w\') as _wf:
+    _wf.setnchannels(1)
+    _wf.setsampwidth(2)
+    _wf.setframerate(SR)
+    _wf.writeframes(_pcm.tobytes())
 subprocess.run(["ffmpeg", "-i", _wav, "-q:a", "4", MUSIC_MP3, "-y"],
                capture_output=True, check=True)
-import os as _os; _os.remove(_wav)
+os.remove(_wav)
 
 print(f"Music: {_music_dur:.0f}s ambient pentatonic drone")
 print("\\n✅ Music done. Run Cell 8.")
