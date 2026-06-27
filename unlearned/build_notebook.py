@@ -135,7 +135,7 @@ CELL_INPUT = code('''\
 # 2. Replace everything between the triple quotes with your script
 # 3. Run this cell
 
-EPISODE_TITLE = "Episode 1: Your Title Here"
+EPISODE_TITLE = """Episode 1: Your Title Here"""
 
 YOUR_SCRIPT = """
 PASTE YOUR UNLEARNED SCRIPT HERE
