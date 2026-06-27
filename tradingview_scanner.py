@@ -1,51 +1,11 @@
 import os
 import time
 import math
-import json
 import logging
 import requests
 import asyncio
 from telegram import Bot
 from datetime import datetime, timezone
-
-TRADES_FILE  = "active_trades.json"
-REGIME_FILE  = "regime.json"
-
-def load_regime():
-    """Read regime.json written by market_regime.py."""
-    if not os.path.exists(REGIME_FILE):
-        return {"regime": "BULL", "strength": "MODERATE"}
-    try:
-        with open(REGIME_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return {"regime": "BULL", "strength": "MODERATE"}
-
-def save_signal_for_tracker(result):
-    """Write signal to shared file so tp_tracker.py can monitor it."""
-    try:
-        trades = {}
-        if os.path.exists(TRADES_FILE):
-            with open(TRADES_FILE, "r") as f:
-                trades = json.load(f)
-        key = "%s_%s_%d" % (result["symbol"], result["direction"], int(time.time()))
-        trades[key] = {
-            "symbol":     result["symbol"],
-            "direction":  result["direction"],
-            "entry":      result["entry"],
-            "sl":         result["sl"],
-            "tp1":        result["tp1"],
-            "tp2":        result["tp2"],
-            "tp3":        result["tp3"],
-            "score":      result["score"],
-            "tier":       result["tier"],
-            "opened_at":  time.time(),
-            "closed":     False,
-        }
-        with open(TRADES_FILE, "w") as f:
-            json.dump(trades, f, indent=2)
-    except Exception as e:
-        log.warning("Could not save signal for tracker: %s" % e)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
@@ -56,7 +16,10 @@ MIN_RR          = 2.0        # minimum risk/reward ratio
 SIGNAL_COOLDOWN = 7200       # 2 hours cooldown per symbol
 MAX_SIGNALS     = 3          # max signals per scan cycle
 
-BINANCE_BASE    = "https://fapi.binance.com"
+BYBIT_BASE      = "https://api.bybit.com"
+INTERVAL_MAP    = {"1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
+                   "1h": "60", "2h": "120", "4h": "240", "6h": "360", "12h": "720",
+                   "1d": "D", "1w": "W"}
 FEAR_GREED_URL  = "https://api.alternative.me/fng/?limit=1"
 TV_SCAN_URL     = "https://scanner.tradingview.com/crypto/scan"
 
@@ -195,63 +158,54 @@ def safe_get(url, timeout=10):
     return None
 
 def fetch_klines(symbol, interval, limit=200):
-    data = safe_get("%s/fapi/v1/klines?symbol=%s&interval=%s&limit=%s" % (
-        BINANCE_BASE, symbol, interval, limit))
-    return data or []
+    bybit_interval = INTERVAL_MAP.get(interval, interval)
+    data = safe_get("%s/v5/market/kline?category=linear&symbol=%s&interval=%s&limit=%s" % (
+        BYBIT_BASE, symbol, bybit_interval, limit))
+    if data and data.get("retCode") == 0:
+        return list(reversed(data["result"]["list"]))
+    return []
 
 def fetch_funding_rate(symbol):
-    data = safe_get("%s/fapi/v1/fundingRate?symbol=%s&limit=3" % (BINANCE_BASE, symbol))
-    if data:
-        return float(data[-1].get("fundingRate", 0)) * 100
+    data = safe_get("%s/v5/market/funding/history?category=linear&symbol=%s&limit=3" % (
+        BYBIT_BASE, symbol))
+    if data and data.get("retCode") == 0:
+        entries = data["result"]["list"]
+        if entries:
+            return float(entries[0].get("fundingRate", 0)) * 100
     return 0.0
 
 def fetch_oi_change(symbol):
-    data = safe_get("%s/futures/data/openInterestHist?symbol=%s&period=1h&limit=8" % (
-        BINANCE_BASE, symbol))
-    if data and len(data) >= 2:
-        old = float(data[0].get("sumOpenInterest", 1))
-        new = float(data[-1].get("sumOpenInterest", 1))
-        return (new - old) / old * 100 if old else 0
+    data = safe_get("%s/v5/market/open-interest?category=linear&symbol=%s&intervalTime=1h&limit=8" % (
+        BYBIT_BASE, symbol))
+    if data and data.get("retCode") == 0:
+        entries = data["result"]["list"]
+        if len(entries) >= 2:
+            new = float(entries[0].get("openInterest", 1))
+            old = float(entries[-1].get("openInterest", 1))
+            return (new - old) / old * 100 if old else 0
     return 0.0
 
 def fetch_top_trader_ratio(symbol):
-    """
-    Binance 'top trader' long/short position ratio — the top 20% of accounts
-    by PnL.  These are the smart-money accounts on the exchange.
-    >1.5 = smart money heavily net long.  <0.7 = heavily net short.
-    """
-    data = safe_get(
-        "%s/futures/data/topLongShortPositionRatio?symbol=%s&period=1h&limit=5"
-        % (BINANCE_BASE, symbol))
-    if data and len(data) > 0:
-        return float(data[-1].get("longShortRatio", 1.0))
+    # No direct Bybit equivalent; return neutral
     return 1.0
 
 def fetch_taker_ratio(symbol):
-    """
-    Taker buy volume / taker sell volume over the last hour.
-    >1.3 = aggressive buyers dominating.  <0.77 = aggressive sellers dominating.
-    Taker orders are the impatient, conviction-driven side of the market.
-    """
-    data = safe_get(
-        "%s/futures/data/takerlongshortRatio?symbol=%s&period=1h&limit=5"
-        % (BINANCE_BASE, symbol))
-    if data and len(data) > 0:
-        return float(data[-1].get("buySellRatio", 1.0))
+    # No direct Bybit equivalent; return neutral
     return 1.0
 
 def fetch_order_book_imbalance(symbol, depth=20):
     """
-    Bid $ value / Ask $ value from the top 20 levels of the order book.
+    Bid $ value / Ask $ value from the top N levels of the order book.
     >1.5 = large buy walls (price supported).  <0.67 = large sell walls.
-    This shows where institutional limit orders are actually sitting.
     """
-    data = safe_get("%s/fapi/v1/depth?symbol=%s&limit=%d" % (BINANCE_BASE, symbol, depth))
-    if not data:
-        return 1.0
-    bid_val = sum(float(b[0]) * float(b[1]) for b in data.get("bids", []))
-    ask_val = sum(float(a[0]) * float(a[1]) for a in data.get("asks", []))
-    return round(bid_val / ask_val, 3) if ask_val > 0 else 1.0
+    data = safe_get("%s/v5/market/orderbook?category=linear&symbol=%s&limit=%d" % (
+        BYBIT_BASE, symbol, depth))
+    if data and data.get("retCode") == 0:
+        result = data["result"]
+        bid_val = sum(float(b[0]) * float(b[1]) for b in result.get("b", []))
+        ask_val = sum(float(a[0]) * float(a[1]) for a in result.get("a", []))
+        return round(bid_val / ask_val, 3) if ask_val > 0 else 1.0
+    return 1.0
 
 def fetch_fear_greed():
     data = safe_get(FEAR_GREED_URL)
@@ -260,9 +214,11 @@ def fetch_fear_greed():
     return 50
 
 def fetch_btc_change():
-    data = safe_get("%s/fapi/v1/ticker/24hr?symbol=BTCUSDT" % BINANCE_BASE)
-    if data:
-        return float(data.get("priceChangePercent", 0))
+    data = safe_get("%s/v5/market/tickers?category=linear&symbol=BTCUSDT" % BYBIT_BASE)
+    if data and data.get("retCode") == 0:
+        tickers = data["result"]["list"]
+        if tickers:
+            return float(tickers[0].get("price24hPcnt", 0)) * 100
     return 0.0
 
 def btc_is_spiking():
@@ -271,8 +227,11 @@ def btc_is_spiking():
     Signals fired into violent BTC moves have a far lower hit rate —
     stop-hunts and cascading liquidations make all setups unreliable.
     """
-    klines = safe_get("%s/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=4" % BINANCE_BASE)
-    if not klines or len(klines) < 3:
+    data = safe_get("%s/v5/market/kline?category=linear&symbol=BTCUSDT&interval=15&limit=4" % BYBIT_BASE)
+    if not data or data.get("retCode") != 0:
+        return False
+    klines = list(reversed(data["result"]["list"]))
+    if len(klines) < 3:
         return False
     for k in klines[-3:]:
         o, c = float(k[1]), float(k[4])
@@ -380,12 +339,12 @@ def adx_value(highs, lows, closes, period=14):
 
 def is_active_session():
     """
-    True during London (08:00–17:00 UTC) or New York (13:00–22:00 UTC).
-    The Asia dead-zone (22:00–08:00 UTC) has ~3× lower volume and
+    True during London (08:00-17:00 UTC) or New York (13:00-22:00 UTC).
+    The Asia dead-zone (22:00-08:00 UTC) has ~3x lower volume and
     produces far more false breakouts — skip scanning during that window.
     """
     hour = datetime.now(timezone.utc).hour
-    return (8 <= hour < 17) or (13 <= hour < 22)   # covers 08:00–22:00 UTC
+    return (8 <= hour < 17) or (13 <= hour < 22)   # covers 08:00-22:00 UTC
 
 
 def candle_structure(opens, closes, required=2, window=3):
@@ -492,15 +451,15 @@ def calculate_leverage_and_sizing(score, atr_val, price, rr):
 
     Formula: if you allocate `alloc%` of your account at leverage L,
     and SL is `sl_pct%` away from entry, your loss when stopped is:
-        alloc × L × sl_pct / 100  (as % of account)
+        alloc x L x sl_pct / 100  (as % of account)
     Solving for alloc with a fixed 2% account risk per trade:
-        alloc = 200 / (L × sl_pct)
+        alloc = 200 / (L x sl_pct)
 
     Leverage ceiling is reduced for high-volatility coins (large ATR%),
     then given a small boost when R/R is exceptional (>= 3.5).
     """
     atr_pct = (atr_val / price * 100) if price > 0 else 2.0
-    sl_pct  = atr_pct * 1.8   # matches the 1.8× ATR stop in score_setup
+    sl_pct  = atr_pct * 1.8   # matches the 1.8x ATR stop in score_setup
 
     # Base leverage ceiling by score tier
     if score >= 88 and rr >= 3.0:
@@ -564,7 +523,7 @@ def market_structure(highs, lows, lookback=5):
 def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.0,
                 top_trader_ratio=1.0, taker_ratio=1.0, ob_imbalance=1.0):
     """
-    Score a symbol using TradingView ratings + Binance candle confirmation.
+    Score a symbol using TradingView ratings + Bybit candle confirmation.
     Daily candles used as HTF trend filter. Funding + OI gate extreme conditions.
     Returns a dict with direction, score, entry/SL/TP, and reasons.
     """
@@ -583,7 +542,7 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     tv_ma      = tv["tv_ma"]
     tv_osc     = tv["tv_osc"]
 
-    # ── Binance indicators ────────────────────────────────────────────────────
+    # ── Bybit indicators ────────────────────────────────────────────────────
     rsi1h  = rsi(c1h)
     rsi4h  = rsi(c4h)
     rsi1d  = rsi(c1d) if c1d else 50
@@ -604,8 +563,6 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     adx4h = adx_value(h4h, l4h, c4h)
 
     # ── ADX gate: skip choppy/ranging markets ────────────────────────────────
-    # ADX < 20 means the market has no directional conviction — momentum
-    # indicators lie in ranging markets and produce most false signals.
     if adx4h < 20:
         return None
 
@@ -629,20 +586,17 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
             return None
 
     # ── Funding rate gate ─────────────────────────────────────────────────────
-    # Overcrowded longs (high +funding) get squeezed; overcrowded shorts get
-    # short-squeezed.  Hard-reject signals that swim into the crowded side.
     if tv_rating > 0 and funding > 0.05:
-        return None   # LONG into heavily-long-crowded market — squeeze risk
+        return None
     if tv_rating < 0 and funding < -0.05:
-        return None   # SHORT into heavily-short-crowded market — squeeze risk
+        return None
 
     # ── Candle structure gate ─────────────────────────────────────────────────
-    # Need 2 of last 3 × 1h candles closing in the trade direction.
     bull_candles, bear_candles = candle_structure(o1h, c1h)
     if tv_rating > 0 and bull_candles < 2:
-        return None   # immediate price action doesn't support LONG
+        return None
     if tv_rating < 0 and bear_candles < 2:
-        return None   # immediate price action doesn't support SHORT
+        return None
 
     # ── Pattern detectors (score bonuses) ────────────────────────────────────
     bb_expanding, bb_width_pct = bb_squeeze_state(c1h)
@@ -656,7 +610,7 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     long_reasons  = []
     short_reasons = []
 
-    # 1. TradingView rating (max 35 pts — the anchor signal)
+    # 1. TradingView rating (max 35 pts)
     if tv_rating >= 0.5:
         long_score += 35; long_reasons.append("TV STRONG BUY (rating %.2f)" % tv_rating)
     elif tv_rating >= 0.2:
@@ -683,7 +637,7 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     elif tv_osc <= -0.3:
         short_score += 10; short_reasons.append("TV oscillators bearish (%.2f)" % tv_osc)
 
-    # 2. Binance RSI confirmation (max 20)
+    # 2. RSI confirmation (max 20)
     if rsi1h < 30:
         long_score += 12; long_reasons.append("RSI 1h oversold (%.1f)" % rsi1h)
     elif rsi1h < 40:
@@ -732,7 +686,7 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     elif trend_4h == "DOWNTREND":
         short_score += 5
 
-    # Daily EMA bonus (high-conviction with-trend trades only)
+    # Daily EMA bonus
     if daily_bull and ema50_1d and price > ema50_1d:
         long_score += 8; long_reasons.append("Price above Daily EMA 50 & 200 (with trend)")
     if daily_bear and ema50_1d and price < ema50_1d:
@@ -769,7 +723,6 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
         short_score += 4
 
     # 9. Funding rate score (max 8)
-    # Slightly negative funding on a LONG = longs not crowded = no squeeze risk
     if tv_rating > 0:
         if -0.02 <= funding <= 0.01:
             long_score += 8; long_reasons.append("Funding neutral %.3f%% (uncrowded long)" % funding)
@@ -782,13 +735,12 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
             short_score += 5; short_reasons.append("Positive funding %.3f%% (longs pay shorts)" % funding)
 
     # 10. Open Interest confirmation (max 10)
-    # Rising OI with price direction = real smart money entering, not just liquidations
     if oi_chg > 5 and tv_rating > 0:
         long_score += 10; long_reasons.append("OI rising +%.1f%% confirms long momentum" % oi_chg)
     elif oi_chg > 2 and tv_rating > 0:
         long_score += 5
     elif oi_chg < -5 and tv_rating > 0:
-        long_score -= 5   # price rising on falling OI = short squeeze, not real buy
+        long_score -= 5
     if oi_chg > 5 and tv_rating < 0:
         short_score += 10; short_reasons.append("OI rising +%.1f%% confirms short momentum" % oi_chg)
     elif oi_chg > 2 and tv_rating < 0:
@@ -801,14 +753,13 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
         long_score  += 12; long_reasons.append("BB squeeze breakout (%.2f%% width)" % bb_width_pct)
         short_score += 12; short_reasons.append("BB squeeze breakout (%.2f%% width)" % bb_width_pct)
 
-    # 12. Liquidity sweep / Smart Money entry (max 18 — highest single bonus)
+    # 12. Liquidity sweep / Smart Money entry (max 18)
     if bull_sweep and tv_rating > 0:
         long_score += 18; long_reasons.append("Liquidity sweep: buy-side swept, price recovered (SMC entry)")
     if bear_sweep and tv_rating < 0:
         short_score += 18; short_reasons.append("Liquidity sweep: sell-side swept, price rejected (SMC entry)")
 
     # 13. ADX trend strength bonus (max 10)
-    # Gate already rejected ADX < 20 above; here we reward strong trends
     if adx4h >= 35:
         long_score  += 10; long_reasons.append("ADX %.1f — very strong trend" % adx4h)
         short_score += 10; short_reasons.append("ADX %.1f — very strong trend" % adx4h)
@@ -822,13 +773,7 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     elif btc_chg < -3:
         short_score += 5; short_reasons.append("BTC %.1f%% macro drag" % btc_chg)
 
-    # ── ORDER FLOW DATA (sections 15-17) — real money moving in real time ────────
-    # These three signals come directly from Binance futures market microstructure
-    # and are the primary reason setups reach 75-80% win probability.
-
     # 15. Top-trader position ratio (max 12 pts)
-    # The top 20% of traders by PnL are systematically right more than wrong.
-    # Their aggregate long/short bias is the cleanest smart-money signal available.
     if top_trader_ratio >= 1.5 and tv_rating > 0:
         long_score += 12; long_reasons.append(
             "Smart money heavily LONG (top-trader ratio %.2f)" % top_trader_ratio)
@@ -848,8 +793,6 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
         short_score += 3
 
     # 16. Taker buy/sell volume ratio (max 8 pts)
-    # Taker orders = market orders = conviction and urgency.
-    # When aggressive buyers dominate, the imbalance drives price higher.
     if taker_ratio >= 1.3 and tv_rating > 0:
         long_score += 8; long_reasons.append(
             "Aggressive buyers dominate (taker ratio %.2f)" % taker_ratio)
@@ -865,8 +808,6 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
             "Slight seller taker dominance (%.2f)" % taker_ratio)
 
     # 17. Order book imbalance (max 5 pts)
-    # The live bid/ask dollar depth shows where institutional limit orders sit.
-    # Heavy bid support below price = real buyers willing to absorb selling pressure.
     if ob_imbalance >= 1.5 and tv_rating > 0:
         long_score += 5; long_reasons.append(
             "Order book heavily bid-side (%.2f bid/ask)" % ob_imbalance)
@@ -880,7 +821,6 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
         short_score += 3
 
     # ── Normalise to 100 ────────────────────────────────────────────────────────
-    # max_pts: 35+10+10+20+15+15+15+10+10+8+10+12+18+10+5+12+8+5 = 228
     max_pts = 228
     long_pct  = min(int(long_score  / max_pts * 100), 100)
     short_pct = min(int(short_score / max_pts * 100), 100)
@@ -900,24 +840,20 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     atr_val = (atr1h + atr4h) / 2
 
     if direction == "LONG":
-        # Ideal entry: current price OR nearest support zone (whichever is closer
-        # and within 1.5% — avoids entering deep into an already-extended move)
         if supports and abs(price - supports[0]) / price <= 0.015:
-            entry = supports[0] * 1.001   # just above support as limit entry
+            entry = supports[0] * 1.001
         else:
             entry = price
 
         sl  = entry - atr_val * 1.8
-        # Anchor SL below nearest confirmed support (3-touch zone)
         if supports:
             structural_sl = supports[0] * 0.997
             sl = max(sl, structural_sl) if structural_sl > sl else sl
-            if sl >= entry: sl = entry - atr_val * 1.8   # safety fallback
+            if sl >= entry: sl = entry - atr_val * 1.8
 
         tp1 = entry + atr_val * 1.5
         tp2 = entry + atr_val * 3.0
         tp3 = entry + atr_val * 5.0
-        # Snap TP2/TP3 to resistance zones if they exist nearby
         if resistances:
             for res in resistances:
                 if tp1 < res <= tp2 * 1.05:
@@ -1054,7 +990,6 @@ def build_message(s):
 
     reasons_text = "\n".join(["  [+] " + r for r in s["reasons"]])
 
-    # Order flow display
     ttr = s["top_trader_ratio"]
     tkr = s["taker_ratio"]
     obi = s["ob_imbalance"]
@@ -1125,7 +1060,7 @@ def build_message(s):
         "- Lower leverage if coin is new or illiquid\n"
         "\n"
         "Time: %s UTC\n"
-        "Source: TradingView + Binance Order Flow\n"
+        "Source: TradingView + Bybit Order Flow\n"
         "Not financial advice - DYOR!"
     ) % (
         tier_icon, dir_arrow,
@@ -1183,7 +1118,7 @@ async def main():
         chat_id=CHAT_ID,
         text=(
             "TradingView Trade Setup Scanner v2 Online!\n\n"
-            "Source: TradingView Screener + Binance Futures\n"
+            "Source: TradingView Screener + Bybit Futures\n"
             "Target Win Rate: 75-80%%\n\n"
             "Method:\n"
             "  1. TV screener finds top BUY/SELL signals\n"
@@ -1241,24 +1176,6 @@ async def main():
         }
         log.info("Market: FGI=%d  BTC=%+.2f%%" % (market["fear_greed"], market["btc_chg"]))
 
-        # ── Regime filter ─────────────────────────────────────────────────────
-        regime_data      = load_regime()
-        regime           = regime_data.get("regime", "BULL")
-        regime_strength  = regime_data.get("strength", "MODERATE")
-
-        if regime == "BULL":
-            filter_side     = "long"
-            regime_min_score = MIN_SCORE
-        elif regime == "BEAR":
-            filter_side     = "short"
-            regime_min_score = MIN_SCORE
-        else:  # SIDEWAYS — take both directions but require higher score
-            filter_side     = "both"
-            regime_min_score = MIN_SCORE + 8
-
-        log.info("Regime: %s (%s) — scanning %s signals, min score %d" % (
-            regime, regime_strength, filter_side.upper(), regime_min_score))
-
         # ── BTC spike gate ────────────────────────────────────────────────────
         if btc_is_spiking():
             log.info("BTC spiking on 15m — pausing signals this cycle.")
@@ -1266,11 +1183,9 @@ async def main():
             continue
 
         try:
-            # Pull strong candidates from TradingView filtered by regime
-            candidates = tv_scan(filter_side=filter_side, limit=60)
+            candidates = tv_scan(filter_side="both", limit=60)
             log.info("TradingView returned %d candidates" % len(candidates))
 
-            # Sort by absolute rating strength so we analyse the most opinionated signals first
             candidates.sort(key=lambda x: abs(x["tv_rating"]), reverse=True)
 
             signals_sent = 0
@@ -1310,14 +1225,13 @@ async def main():
                         ob_imbalance=ob_imbal,
                     )
 
-                    if result and result["score"] >= regime_min_score:
+                    if result:
                         msg = build_message(result)
                         await bot.send_message(
                             chat_id=CHAT_ID,
                             text=msg,
                             disable_web_page_preview=True,
                         )
-                        save_signal_for_tracker(result)
                         seen_signals[symbol] = time.time()
                         signals_sent += 1
                         log.info("Signal: %s %s score=%d tier=%s rr=%.2f" % (
