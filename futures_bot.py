@@ -7,15 +7,17 @@ import asyncio
 from telegram import Bot
 from datetime import datetime
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHAT_ID          = os.environ.get("CHAT_ID", "YOUR_CHAT_ID_HERE")
 SCAN_INTERVAL    = 300        # 5 minutes
 MIN_SCORE        = 75         # minimum confluence score
 MIN_RR           = 2.0        # minimum risk/reward ratio
 SIGNAL_COOLDOWN  = 7200       # 2 hours between signals per pair
-BINANCE_BASE     = "https://fapi.binance.com"
-SPOT_BASE        = "https://api.binance.com"
+BYBIT_BASE       = "https://api.bybit.com"
+INTERVAL_MAP     = {"1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
+                    "1h": "60", "2h": "120", "4h": "240", "6h": "360", "12h": "720",
+                    "1d": "D", "1w": "W"}
 FEAR_GREED_URL   = "https://api.alternative.me/fng/?limit=1"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -35,45 +37,64 @@ def safe_get(url, timeout=10):
     return None
 
 def fetch_top_pairs(min_vol=50_000_000):
-    data = safe_get("%s/fapi/v1/ticker/24hr" % BINANCE_BASE)
-    if not data: return []
-    pairs = [t for t in data if t.get("symbol","").endswith("USDT")]
-    pairs = [t for t in pairs if float(t.get("quoteVolume",0)) >= min_vol]
-    pairs.sort(key=lambda x: float(x.get("quoteVolume",0)), reverse=True)
-    return pairs[:40]
+    data = safe_get("%s/v5/market/tickers?category=linear" % BYBIT_BASE)
+    if not data or data.get("retCode") != 0:
+        return []
+    tickers = data["result"]["list"]
+    pairs = [t for t in tickers if t.get("symbol", "").endswith("USDT")]
+    pairs = [t for t in pairs if float(t.get("turnover24h", 0)) >= min_vol]
+    pairs.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
+    # Normalize to Binance-compatible field names used downstream
+    normalized = []
+    for t in pairs[:40]:
+        normalized.append({
+            "symbol":             t["symbol"],
+            "lastPrice":          t.get("lastPrice", "0"),
+            "quoteVolume":        t.get("turnover24h", "0"),
+            "priceChangePercent": str(float(t.get("price24hPcnt", "0")) * 100),
+        })
+    return normalized
 
 def fetch_klines(symbol, interval, limit=200):
-    data = safe_get("%s/fapi/v1/klines?symbol=%s&interval=%s&limit=%s" % (
-        BINANCE_BASE, symbol, interval, limit))
-    return data or []
+    bybit_interval = INTERVAL_MAP.get(interval, interval)
+    data = safe_get("%s/v5/market/kline?category=linear&symbol=%s&interval=%s&limit=%s" % (
+        BYBIT_BASE, symbol, bybit_interval, limit))
+    if data and data.get("retCode") == 0:
+        return list(reversed(data["result"]["list"]))
+    return []
 
 def fetch_funding_rate(symbol):
-    data = safe_get("%s/fapi/v1/fundingRate?symbol=%s&limit=3" % (BINANCE_BASE, symbol))
-    if data and len(data) > 0:
-        return float(data[-1].get("fundingRate", 0)) * 100
+    data = safe_get("%s/v5/market/funding/history?category=linear&symbol=%s&limit=3" % (
+        BYBIT_BASE, symbol))
+    if data and data.get("retCode") == 0:
+        entries = data["result"]["list"]
+        if entries:
+            return float(entries[0].get("fundingRate", 0)) * 100
     return 0.0
 
 def fetch_open_interest(symbol):
-    data = safe_get("%s/fapi/v1/openInterest?symbol=%s" % (BINANCE_BASE, symbol))
-    if data:
-        return float(data.get("openInterest", 0))
+    data = safe_get("%s/v5/market/open-interest?category=linear&symbol=%s&intervalTime=1h&limit=1" % (
+        BYBIT_BASE, symbol))
+    if data and data.get("retCode") == 0:
+        entries = data["result"]["list"]
+        if entries:
+            return float(entries[0].get("openInterest", 0))
     return 0.0
 
 def fetch_oi_history(symbol):
-    data = safe_get("%s/futures/data/openInterestHist?symbol=%s&period=1h&limit=24" % (
-        BINANCE_BASE, symbol))
-    if data and len(data) >= 2:
-        old_oi = float(data[0].get("sumOpenInterest", 0))
-        new_oi = float(data[-1].get("sumOpenInterest", 0))
-        change = (new_oi - old_oi) / old_oi * 100 if old_oi > 0 else 0
-        return change, new_oi
+    data = safe_get("%s/v5/market/open-interest?category=linear&symbol=%s&intervalTime=1h&limit=24" % (
+        BYBIT_BASE, symbol))
+    if data and data.get("retCode") == 0:
+        entries = data["result"]["list"]
+        if len(entries) >= 2:
+            new_oi = float(entries[0].get("openInterest", 0))
+            old_oi = float(entries[-1].get("openInterest", 0))
+            change = (new_oi - old_oi) / old_oi * 100 if old_oi > 0 else 0
+            return change, new_oi
     return 0.0, 0.0
 
 def fetch_long_short_ratio(symbol):
-    data = safe_get("%s/futures/data/globalLongShortAccountRatio?symbol=%s&period=1h&limit=5" % (
-        BINANCE_BASE, symbol))
-    if data and len(data) > 0:
-        return float(data[-1].get("longShortRatio", 1.0))
+    # No direct Bybit equivalent; return neutral
     return 1.0
 
 def fetch_fear_greed():
@@ -90,9 +111,11 @@ def fetch_btc_dominance():
     return 50.0
 
 def fetch_btc_ticker():
-    data = safe_get("%s/fapi/v1/ticker/24hr?symbol=BTCUSDT" % BINANCE_BASE)
-    if data:
-        return float(data.get("priceChangePercent", 0))
+    data = safe_get("%s/v5/market/tickers?category=linear&symbol=BTCUSDT" % BYBIT_BASE)
+    if data and data.get("retCode") == 0:
+        tickers = data["result"]["list"]
+        if tickers:
+            return float(tickers[0].get("price24hPcnt", 0)) * 100
     return 0.0
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -217,7 +240,6 @@ def market_structure(highs, lows, closes):
     if len(sh) < 2 or len(sl) < 2:
         return "NEUTRAL", False, False
 
-    # Check HH/HL (uptrend) or LH/LL (downtrend)
     last_highs = [h for _,h in sh[-3:]]
     last_lows  = [l for _,l in sl[-3:]]
 
@@ -230,7 +252,6 @@ def market_structure(highs, lows, closes):
     elif lh and ll: trend = "DOWNTREND"
     else: trend = "RANGING"
 
-    # Break of Structure
     bos_bull = len(sh) >= 2 and closes[-1] > sh[-2][1]
     bos_bear = len(sl) >= 2 and closes[-1] < sl[-2][1]
 
@@ -269,35 +290,28 @@ def detect_candlestick_patterns(opens, highs, lows, closes):
     body = abs(c - o)
     full_range = h - l
 
-    # Doji
     if full_range > 0 and body / full_range < 0.1:
         patterns.append("Doji (indecision)")
 
-    # Hammer (bullish)
     lower_wick = min(o,c) - l
     upper_wick = h - max(o,c)
     if body > 0 and lower_wick >= 2*body and upper_wick <= 0.5*body and c > o:
         patterns.append("Hammer (bullish)")
 
-    # Shooting Star (bearish)
     if body > 0 and upper_wick >= 2*body and lower_wick <= 0.5*body and c < o:
         patterns.append("Shooting Star (bearish)")
 
-    # Bullish Engulfing
     if pc < po and c > o and c > po and o < pc:
         patterns.append("Bullish Engulfing")
 
-    # Bearish Engulfing
     if pc > po and c < o and c < po and o > pc:
         patterns.append("Bearish Engulfing")
 
-    # Morning Star (bullish reversal)
     if len(closes) >= 3:
         o2,c2 = opens[-3], closes[-3]
         if c2 < o2 and abs(o-c) < abs(o2-c2)*0.3 and c > (o2+c2)/2:
             patterns.append("Morning Star (bullish reversal)")
 
-    # Evening Star (bearish reversal)
     if len(closes) >= 3:
         o2,c2 = opens[-3], closes[-3]
         if c2 > o2 and abs(o-c) < abs(o2-c2)*0.3 and c < (o2+c2)/2:
@@ -311,12 +325,10 @@ def detect_divergence(closes, rsi_vals, lookback=20):
     price_slice = closes[-lookback:]
     rsi_slice   = rsi_vals[-lookback:]
 
-    # Bullish divergence: price lower low, RSI higher low
     price_ll = price_slice[-1] < min(price_slice[:-5])
     rsi_hl   = rsi_slice[-1]   > min(rsi_slice[:-5])
     bull_div = price_ll and rsi_hl
 
-    # Bearish divergence: price higher high, RSI lower high
     price_hh = price_slice[-1] > max(price_slice[:-5])
     rsi_lh   = rsi_slice[-1]   < max(rsi_slice[:-5])
     bear_div = price_hh and rsi_lh
@@ -335,7 +347,6 @@ def analyze(symbol, ticker, market_data):
     if price == 0 or vol_24h < 30_000_000:
         return None
 
-    # Fetch multi-timeframe candles
     k15  = fetch_klines(symbol, "15m", 150); time.sleep(0.15)
     k1h  = fetch_klines(symbol, "1h",  200); time.sleep(0.15)
     k4h  = fetch_klines(symbol, "4h",  100); time.sleep(0.15)
@@ -349,7 +360,6 @@ def analyze(symbol, ticker, market_data):
     o4h,h4h,l4h,c4h,v4h = parse_klines(k4h)
     o1d,h1d,l1d,c1d,v1d = parse_klines(k1d) if k1d else ([],[],[],[],[])
 
-    # ── Indicators ──────────────────────────────────────────────────────────
     rsi15  = rsi(c15);  rsi1h = rsi(c1h);  rsi4h = rsi(c4h)
     rsi1d  = rsi(c1d) if c1d else 50
 
@@ -381,36 +391,28 @@ def analyze(symbol, ticker, market_data):
     obv_s = obv_trend(c1h, v1h)
     vwap1h = vwap(h1h, l1h, c1h, v1h)
 
-    # Volume analysis
     avg_vol_1h = sum(v1h[-20:]) / 20 if len(v1h) >= 20 else v1h[-1]
     vol_spike  = v1h[-1] / avg_vol_1h if avg_vol_1h > 0 else 1
 
-    # Market structure
     trend_1h, bos_bull_1h, bos_bear_1h = market_structure(h1h, l1h, c1h)
     trend_4h, bos_bull_4h, bos_bear_4h = market_structure(h4h, l4h, c4h)
 
-    # Support/Resistance zones
     supports, resistances = find_sr_zones(h1h, l1h, c1h)
 
-    # Candlestick patterns
     candle_patterns_1h = detect_candlestick_patterns(o1h, h1h, l1h, c1h)
     candle_patterns_15m = detect_candlestick_patterns(o15, h15, l15, c15)
 
-    # RSI history for divergence
     rsi_hist = [rsi(c1h[:i]) for i in range(20, len(c1h)+1)]
     bull_div, bear_div = detect_divergence(c1h, rsi_hist)
 
-    # Market-wide data
     fear_greed = market_data.get("fear_greed", 50)
     btc_dom    = market_data.get("btc_dom", 50)
     btc_chg    = market_data.get("btc_chg", 0)
 
-    # Funding & OI
     funding    = fetch_funding_rate(symbol);  time.sleep(0.1)
     oi_chg, oi = fetch_oi_history(symbol);   time.sleep(0.1)
     ls_ratio   = fetch_long_short_ratio(symbol); time.sleep(0.1)
 
-    # ── Scoring Engine ───────────────────────────────────────────────────────
     long_score  = 0
     short_score = 0
     long_reasons  = []
@@ -593,12 +595,10 @@ def analyze(symbol, ticker, market_data):
     elif btc_chg < -3 and symbol != "BTCUSDT":
         short_score += 8; short_reasons.append("BTC dumping %.1f%% (correlation)" % btc_chg)
 
-    # ── Normalize scores ─────────────────────────────────────────────────────
     max_possible = 219
     long_pct  = min(int(long_score  / max_possible * 100), 100)
     short_pct = min(int(short_score / max_possible * 100), 100)
 
-    # ── Determine direction ──────────────────────────────────────────────────
     direction = None
     final_score = 0
     reasons = []
@@ -615,7 +615,6 @@ def analyze(symbol, ticker, market_data):
     if not direction:
         return None
 
-    # ── Entry, SL, TP (ATR-based) ────────────────────────────────────────────
     atr_val = atr1h
 
     if direction == "LONG":
@@ -624,7 +623,6 @@ def analyze(symbol, ticker, market_data):
         tp1   = entry + atr_val * 1.5
         tp2   = entry + atr_val * 3.0
         tp3   = entry + atr_val * 5.0
-        # Adjust SL to nearest support
         if supports and supports[0] > sl:
             sl = supports[0] * 0.998
     else:
@@ -643,12 +641,10 @@ def analyze(symbol, ticker, market_data):
     if rr < MIN_RR:
         return None
 
-    # ── Leverage recommendation ──────────────────────────────────────────────
     if final_score >= 88:   leverage = "5-8x"
     elif final_score >= 80: leverage = "3-5x"
     else:                   leverage = "2-3x"
 
-    # ── Signal quality tier ──────────────────────────────────────────────────
     if final_score >= 88 and rr >= 3.0:   tier = "S-TIER (PREMIUM)"
     elif final_score >= 80 and rr >= 2.5: tier = "A-TIER (HIGH CONF)"
     else:                                  tier = "B-TIER (STANDARD)"
@@ -838,7 +834,6 @@ async def main():
         scan_count += 1
         log.info("Scan #%d starting..." % scan_count)
 
-        # Fetch market-wide data once per scan
         market_data = {
             "fear_greed": fetch_fear_greed(),
             "btc_dom":    fetch_btc_dominance(),
@@ -873,8 +868,7 @@ async def main():
                         signals_sent += 1
                         log.info("Signal: %s %s score=%d tier=%s rr=%.2f" % (
                             symbol, result["direction"], result["score"],
-                            result["tier"], result["rr"]
-                        ))
+                            result["tier"], result["rr"]))
                         await asyncio.sleep(2)
                 except Exception as e:
                     log.error("Error analyzing %s: %s" % (symbol, e))
