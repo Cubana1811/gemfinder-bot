@@ -130,29 +130,32 @@ print("\\n✅ Drive mounted. Run Cell 4.")
 ''')
 
 CELL_INPUT = code('''\
-# ══ CELL 4: Paste Your Script ════════════════════════════════════════════════
-# 1. Change EPISODE_TITLE
-# 2. Replace everything between the triple quotes with your script
+# ══ CELL 4: Set Title & Load Script ══════════════════════════════════════════
+# 1. Change EPISODE_TITLE below (no special characters or apostrophes)
+# 2. Save your script as a .txt file and upload it to:
+#      Google Drive → Unlearned → script.txt
 # 3. Run this cell
 
-EPISODE_TITLE = """Episode 1: Your Title Here"""
+EPISODE_TITLE = """Episode 1 Your Title Here"""
 
-YOUR_SCRIPT = """
-PASTE YOUR UNLEARNED SCRIPT HERE
+# ── Load script from Google Drive ─────────────────────────────────────────────
+_script_path = f"{DRIVE_FOLDER}/script.txt"
+assert os.path.exists(_script_path), (
+    f"script.txt not found!\\n"
+    f"Upload your script as a .txt file to:\\n"
+    f"  Google Drive → Unlearned → script.txt"
+)
 
-Replace this entire block with your episode script.
-Write in clear, concise sentences.
-Aim for 2200-2800 words for a 15-minute episode.
-"""
+with open(_script_path, encoding="utf-8") as _f:
+    YOUR_SCRIPT = _f.read()
 
 _raw = YOUR_SCRIPT.strip()
-assert _raw, "Script is empty!"
-assert "PASTE YOUR" not in _raw, "Replace the placeholder with your actual script."
+assert _raw, "script.txt is empty!"
 _wc  = len(_raw.split())
 _est = round(_wc / 2.8 / 60, 1)
-print(f"Script : {_wc} words  →  ~{_est} min video")
+print(f"Script : {_wc} words  ->  ~{_est} min video")
 print(f"Episode: {EPISODE_TITLE}")
-print("\\n✅ Script loaded. Run Cell 5.")
+print("\\n Script loaded. Run Cell 5.")
 ''')
 
 CELL_PARSE_VOICE = code('''\
