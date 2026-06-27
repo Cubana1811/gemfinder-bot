@@ -130,32 +130,50 @@ print("\\n✅ Drive mounted. Run Cell 4.")
 ''')
 
 CELL_INPUT = code('''\
-# ══ CELL 4: Set Title & Load Script ══════════════════════════════════════════
-# 1. Change EPISODE_TITLE below (no special characters or apostrophes)
-# 2. Save your script as a .txt file and upload it to:
-#      Google Drive → Unlearned → script.txt
-# 3. Run this cell
+# ══ CELL 4: Enter Title & Paste Script ═══════════════════════════════════════
+# Run this cell — two text boxes will appear.
+# Type your episode title in the top box.
+# Paste your full script in the large box below it.
+# Then run Cell 5.
 
-EPISODE_TITLE = """Episode 1 Your Title Here"""
+import ipywidgets as widgets
+from IPython.display import display, clear_output
 
-# ── Load script from Google Drive ─────────────────────────────────────────────
-_script_path = f"{DRIVE_FOLDER}/script.txt"
-assert os.path.exists(_script_path), (
-    f"script.txt not found!\\n"
-    f"Upload your script as a .txt file to:\\n"
-    f"  Google Drive → Unlearned → script.txt"
+_title_box = widgets.Text(
+    value="Episode 1 Your Title Here",
+    description="Title:",
+    layout=widgets.Layout(width="90%"),
+    style={"description_width": "60px"},
 )
+_script_box = widgets.Textarea(
+    value="",
+    placeholder="Paste your full script here...",
+    description="Script:",
+    layout=widgets.Layout(width="90%", height="320px"),
+    style={"description_width": "60px"},
+)
+_btn = widgets.Button(description="Load Script", button_style="success")
+_out = widgets.Output()
 
-with open(_script_path, encoding="utf-8") as _f:
-    YOUR_SCRIPT = _f.read()
+def _load(_):
+    global EPISODE_TITLE, _raw
+    EPISODE_TITLE = _title_box.value.strip()
+    _raw = _script_box.value.strip()
+    with _out:
+        clear_output()
+        if not _raw:
+            print("Paste your script first!")
+        elif not EPISODE_TITLE:
+            print("Enter a title first!")
+        else:
+            _wc  = len(_raw.split())
+            _est = round(_wc / 2.8 / 60, 1)
+            print(f"Script : {_wc} words  ->  ~{_est} min video")
+            print(f"Episode: {EPISODE_TITLE}")
+            print("\\n Script loaded. Run Cell 5.")
 
-_raw = YOUR_SCRIPT.strip()
-assert _raw, "script.txt is empty!"
-_wc  = len(_raw.split())
-_est = round(_wc / 2.8 / 60, 1)
-print(f"Script : {_wc} words  ->  ~{_est} min video")
-print(f"Episode: {EPISODE_TITLE}")
-print("\\n Script loaded. Run Cell 5.")
+_btn.on_click(_load)
+display(_title_box, _script_box, _btn, _out)
 ''')
 
 CELL_PARSE_VOICE = code('''\
@@ -204,6 +222,8 @@ async def _tts(text, path):
     comm = edge_tts.Communicate(text, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH)
     await comm.save(path)
 
+if "_raw" not in dir() or not _raw:
+    raise RuntimeError("Run Cell 4 first and click Load Script!")
 print("Parsing script...")
 _raw_scenes = parse_scenes(_raw)
 print(f"  {len(_raw_scenes)} scenes")
