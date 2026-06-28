@@ -7,7 +7,7 @@ import asyncio
 from telegram import Bot
 from datetime import datetime
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHAT_ID          = os.environ.get("CHAT_ID", "YOUR_CHAT_ID_HERE")
 SCAN_INTERVAL    = 300        # 5 minutes
@@ -240,7 +240,6 @@ def market_structure(highs, lows, closes):
     if len(sh) < 2 or len(sl) < 2:
         return "NEUTRAL", False, False
 
-    # Check HH/HL (uptrend) or LH/LL (downtrend)
     last_highs = [h for _,h in sh[-3:]]
     last_lows  = [l for _,l in sl[-3:]]
 
@@ -253,7 +252,6 @@ def market_structure(highs, lows, closes):
     elif lh and ll: trend = "DOWNTREND"
     else: trend = "RANGING"
 
-    # Break of Structure
     bos_bull = len(sh) >= 2 and closes[-1] > sh[-2][1]
     bos_bear = len(sl) >= 2 and closes[-1] < sl[-2][1]
 
@@ -292,35 +290,28 @@ def detect_candlestick_patterns(opens, highs, lows, closes):
     body = abs(c - o)
     full_range = h - l
 
-    # Doji
     if full_range > 0 and body / full_range < 0.1:
         patterns.append("Doji (indecision)")
 
-    # Hammer (bullish)
     lower_wick = min(o,c) - l
     upper_wick = h - max(o,c)
     if body > 0 and lower_wick >= 2*body and upper_wick <= 0.5*body and c > o:
         patterns.append("Hammer (bullish)")
 
-    # Shooting Star (bearish)
     if body > 0 and upper_wick >= 2*body and lower_wick <= 0.5*body and c < o:
         patterns.append("Shooting Star (bearish)")
 
-    # Bullish Engulfing
     if pc < po and c > o and c > po and o < pc:
         patterns.append("Bullish Engulfing")
 
-    # Bearish Engulfing
     if pc > po and c < o and c < po and o > pc:
         patterns.append("Bearish Engulfing")
 
-    # Morning Star (bullish reversal)
     if len(closes) >= 3:
         o2,c2 = opens[-3], closes[-3]
         if c2 < o2 and abs(o-c) < abs(o2-c2)*0.3 and c > (o2+c2)/2:
             patterns.append("Morning Star (bullish reversal)")
 
-    # Evening Star (bearish reversal)
     if len(closes) >= 3:
         o2,c2 = opens[-3], closes[-3]
         if c2 > o2 and abs(o-c) < abs(o2-c2)*0.3 and c < (o2+c2)/2:
@@ -334,12 +325,10 @@ def detect_divergence(closes, rsi_vals, lookback=20):
     price_slice = closes[-lookback:]
     rsi_slice   = rsi_vals[-lookback:]
 
-    # Bullish divergence: price lower low, RSI higher low
     price_ll = price_slice[-1] < min(price_slice[:-5])
     rsi_hl   = rsi_slice[-1]   > min(rsi_slice[:-5])
     bull_div = price_ll and rsi_hl
 
-    # Bearish divergence: price higher high, RSI lower high
     price_hh = price_slice[-1] > max(price_slice[:-5])
     rsi_lh   = rsi_slice[-1]   < max(rsi_slice[:-5])
     bear_div = price_hh and rsi_lh
@@ -358,7 +347,6 @@ def analyze(symbol, ticker, market_data):
     if price == 0 or vol_24h < 30_000_000:
         return None
 
-    # Fetch multi-timeframe candles
     k15  = fetch_klines(symbol, "15m", 150); time.sleep(0.15)
     k1h  = fetch_klines(symbol, "1h",  200); time.sleep(0.15)
     k4h  = fetch_klines(symbol, "4h",  100); time.sleep(0.15)
@@ -372,7 +360,6 @@ def analyze(symbol, ticker, market_data):
     o4h,h4h,l4h,c4h,v4h = parse_klines(k4h)
     o1d,h1d,l1d,c1d,v1d = parse_klines(k1d) if k1d else ([],[],[],[],[])
 
-    # ── Indicators ──────────────────────────────────────────────────────────
     rsi15  = rsi(c15);  rsi1h = rsi(c1h);  rsi4h = rsi(c4h)
     rsi1d  = rsi(c1d) if c1d else 50
 
@@ -404,36 +391,28 @@ def analyze(symbol, ticker, market_data):
     obv_s = obv_trend(c1h, v1h)
     vwap1h = vwap(h1h, l1h, c1h, v1h)
 
-    # Volume analysis
     avg_vol_1h = sum(v1h[-20:]) / 20 if len(v1h) >= 20 else v1h[-1]
     vol_spike  = v1h[-1] / avg_vol_1h if avg_vol_1h > 0 else 1
 
-    # Market structure
     trend_1h, bos_bull_1h, bos_bear_1h = market_structure(h1h, l1h, c1h)
     trend_4h, bos_bull_4h, bos_bear_4h = market_structure(h4h, l4h, c4h)
 
-    # Support/Resistance zones
     supports, resistances = find_sr_zones(h1h, l1h, c1h)
 
-    # Candlestick patterns
     candle_patterns_1h = detect_candlestick_patterns(o1h, h1h, l1h, c1h)
     candle_patterns_15m = detect_candlestick_patterns(o15, h15, l15, c15)
 
-    # RSI history for divergence
     rsi_hist = [rsi(c1h[:i]) for i in range(20, len(c1h)+1)]
     bull_div, bear_div = detect_divergence(c1h, rsi_hist)
 
-    # Market-wide data
     fear_greed = market_data.get("fear_greed", 50)
     btc_dom    = market_data.get("btc_dom", 50)
     btc_chg    = market_data.get("btc_chg", 0)
 
-    # Funding & OI
     funding    = fetch_funding_rate(symbol);  time.sleep(0.1)
     oi_chg, oi = fetch_oi_history(symbol);   time.sleep(0.1)
     ls_ratio   = fetch_long_short_ratio(symbol); time.sleep(0.1)
 
-    # ── Scoring Engine ───────────────────────────────────────────────────────
     long_score  = 0
     short_score = 0
     long_reasons  = []
@@ -616,12 +595,10 @@ def analyze(symbol, ticker, market_data):
     elif btc_chg < -3 and symbol != "BTCUSDT":
         short_score += 8; short_reasons.append("BTC dumping %.1f%% (correlation)" % btc_chg)
 
-    # ── Normalize scores ─────────────────────────────────────────────────────
     max_possible = 219
     long_pct  = min(int(long_score  / max_possible * 100), 100)
     short_pct = min(int(short_score / max_possible * 100), 100)
 
-    # ── Determine direction ──────────────────────────────────────────────────
     direction = None
     final_score = 0
     reasons = []
@@ -638,7 +615,6 @@ def analyze(symbol, ticker, market_data):
     if not direction:
         return None
 
-    # ── Entry, SL, TP (ATR-based) ────────────────────────────────────────────
     atr_val = atr1h
 
     if direction == "LONG":
@@ -647,7 +623,6 @@ def analyze(symbol, ticker, market_data):
         tp1   = entry + atr_val * 1.5
         tp2   = entry + atr_val * 3.0
         tp3   = entry + atr_val * 5.0
-        # Adjust SL to nearest support
         if supports and supports[0] > sl:
             sl = supports[0] * 0.998
     else:
@@ -666,12 +641,10 @@ def analyze(symbol, ticker, market_data):
     if rr < MIN_RR:
         return None
 
-    # ── Leverage recommendation ──────────────────────────────────────────────
     if final_score >= 88:   leverage = "5-8x"
     elif final_score >= 80: leverage = "3-5x"
     else:                   leverage = "2-3x"
 
-    # ── Signal quality tier ──────────────────────────────────────────────────
     if final_score >= 88 and rr >= 3.0:   tier = "S-TIER (PREMIUM)"
     elif final_score >= 80 and rr >= 2.5: tier = "A-TIER (HIGH CONF)"
     else:                                  tier = "B-TIER (STANDARD)"
@@ -861,7 +834,6 @@ async def main():
         scan_count += 1
         log.info("Scan #%d starting..." % scan_count)
 
-        # Fetch market-wide data once per scan
         market_data = {
             "fear_greed": fetch_fear_greed(),
             "btc_dom":    fetch_btc_dominance(),
@@ -896,8 +868,7 @@ async def main():
                         signals_sent += 1
                         log.info("Signal: %s %s score=%d tier=%s rr=%.2f" % (
                             symbol, result["direction"], result["score"],
-                            result["tier"], result["rr"]
-                        ))
+                            result["tier"], result["rr"]))
                         await asyncio.sleep(2)
                 except Exception as e:
                     log.error("Error analyzing %s: %s" % (symbol, e))

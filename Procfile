@@ -1,2 +1,13 @@
-worker: python bot.py
 tv_scanner: python tradingview_scanner.py
+futures_bot: python futures_bot.py
+tp_tracker: python tp_tracker.py
+trade_journal: python trade_journal.py
+news_sentiment: python news_sentiment.py
+whale_alert: python whale_alert.py
+portfolio_tracker: python portfolio_tracker.py
+market_regime: python market_regime.py
+correlation_filter: python correlation_filter.py
+risk_calculator: python risk_calculator.py
+dca_bot: python dca_bot.py
+performance_dashboard: python performance_dashboard.py
+macro_calendar: python macro_calendar.py

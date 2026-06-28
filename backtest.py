@@ -1,13 +1,9 @@
 """
-GemFinder Backtester — 90-day 4h Binance simulation.
+GemFinder Backtester — 90-day 4h Bybit simulation.
 
 Walks through historical 4h candles for 20 top coins, applies every
-Binance-based gate and scoring rule from tradingview_scanner.py,
+Bybit-based gate and scoring rule from tradingview_scanner.py,
 simulates ATR-based entries, then walks forward to resolve TP1 / TP2 / SL.
-
-TradingView rating is not available historically, so this script tests the
-CONFIRMATION LAYER (Binance gates + indicators) in isolation. In live use the
-TV screener pre-screens candidates, so the actual win rate should be higher.
 
 Usage:
     python backtest.py
@@ -29,8 +25,6 @@ COINS = [
     "LTCUSDT", "ATOMUSDT", "DOTUSDT", "NEARUSDT", "UNIUSDT",
     "OPUSDT",  "AAVEUSDT", "INJUSDT",  "APTUSDT",  "ARBUSDT",
 ]
-
-# ── Inline indicator functions (no import needed) ─────────────────────────────
 
 def safe_get(url, timeout=15):
     try:
@@ -192,7 +186,7 @@ def liquidity_sweep(highs, lows, closes, opens, sweep_window=5, ref_window=20):
     bear_sweep = any(highs[i] > ref_high and closes[i] < ref_high for i in range(-sweep_window, 0))
     return bull_sweep, bear_sweep
 
-# ── Backtester core ───────────────────────────────────────────────────────────
+# ── Backtester core ────────────────────────────────────────────────────────────────────────────
 
 MIN_ADX    = 20
 MIN_SCORE  = 50     # lower threshold for historical test (no TV pre-filter)
@@ -202,12 +196,7 @@ TP2_MULT   = 3.0
 WARMUP     = 60     # bars needed for indicators to stabilise
 
 def score_bar(opens, highs, lows, closes, idx):
-    """
-    Score a single historical bar using the confirmation-layer rules.
-    Returns (direction, score_pct, entry, sl, tp1, tp2) or None.
-    """
     i = idx
-    # Minimum history required
     if i < WARMUP:
         return None
 
@@ -238,25 +227,20 @@ def score_bar(opens, highs, lows, closes, idx):
     score_long  = 0
     score_short = 0
 
-    # RSI
     if rsi1h < 30:   score_long  += 12
     elif rsi1h < 40: score_long  += 6
     if rsi1h > 70:   score_short += 12
     elif rsi1h > 60: score_short += 6
 
-    # MACD
     if mh > 0:  score_long  += 8
     if mh < 0:  score_short += 8
 
-    # EMA stack
     if price > ema21 > ema50: score_long  += 8
     if price < ema21 < ema50: score_short += 8
 
-    # Trend structure
     if trend == "UPTREND":   score_long  += 10
     if trend == "DOWNTREND": score_short += 10
 
-    # ADX bonus
     if adx >= 35:
         score_long  += 10
         score_short += 10
@@ -264,29 +248,25 @@ def score_bar(opens, highs, lows, closes, idx):
         score_long  += 5
         score_short += 5
 
-    # BB squeeze
     if bb_exp:
         score_long  += 12
         score_short += 12
 
-    # SMC sweep
     if bull_sw: score_long  += 18
     if bear_sw: score_short += 18
 
-    # Daily EMA 200 alignment gate
     if ema200 > 0:
         if price < ema200 and score_long > score_short:
-            return None   # counter-trend long rejected
+            return None
         if price > ema200 and score_short > score_long:
-            return None   # counter-trend short rejected
+            return None
 
-    # Candle structure gate
     if score_long > score_short and bull_c < 2:
         return None
     if score_short > score_long and bear_c < 2:
         return None
 
-    max_pts = 84   # 12+8+8+10+10+12+18 per side = 78 + ADX bonus 10 = 88 total possible
+    max_pts = 84
     long_pct  = min(int(score_long  / max_pts * 100), 100)
     short_pct = min(int(score_short / max_pts * 100), 100)
 
@@ -319,10 +299,6 @@ def score_bar(opens, highs, lows, closes, idx):
 
 
 def resolve_trade(direction, entry, sl, tp1, tp2, highs, lows, start_idx):
-    """
-    Walk forward from start_idx to find which level is hit first.
-    Returns ('TP1', bars), ('TP2', bars), ('SL', bars), or ('OPEN', bars).
-    """
     for j in range(start_idx, len(highs)):
         h, l = highs[j], lows[j]
         if direction == "LONG":
@@ -345,7 +321,7 @@ def resolve_trade(direction, entry, sl, tp1, tp2, highs, lows, start_idx):
 def backtest_symbol(symbol, klines):
     opens, highs, lows, closes, _ = parse_klines(klines)
     trades = []
-    last_entry_bar = -20   # avoid overlapping trades
+    last_entry_bar = -20
 
     for i in range(WARMUP, len(closes) - 10):
         if i - last_entry_bar < 10:
@@ -360,12 +336,11 @@ def backtest_symbol(symbol, klines):
             highs, lows, i + 1
         )
 
-        # TP1 = partial win (40%), TP2 = full win; SL = full loss
         if outcome == "TP2":
-            pnl_r = rr          # full R multiple
+            pnl_r = rr
             win   = True
         elif outcome == "TP1":
-            pnl_r = abs(tp1 - entry) / abs(entry - sl)   # partial R
+            pnl_r = abs(tp1 - entry) / abs(entry - sl)
             win   = True
         elif outcome == "SL":
             pnl_r = -1.0
@@ -389,8 +364,6 @@ def backtest_symbol(symbol, klines):
     return trades
 
 
-# ── Reporting ─────────────────────────────────────────────────────────────────
-
 def report(all_trades):
     if not all_trades:
         print("No trades generated.")
@@ -412,7 +385,7 @@ def report(all_trades):
     avg_bars    = sum(t["bars_held"] for t in all_trades) / total if total else 0
 
     print("\n" + "=" * 58)
-    print("  BACKTEST RESULTS — 90-day 4h Binance simulation")
+    print("  BACKTEST RESULTS — 90-day 4h Bybit simulation")
     print("=" * 58)
     print("Total trades:     %d" % total)
     print("Wins (TP1+TP2):   %d  (%.1f%%)" % (len(wins), win_rate))
@@ -426,7 +399,6 @@ def report(all_trades):
     print("Avg R/R setup:    %.2fx" % avg_rr)
     print("Avg bars held:    %.1f  (4h bars = ~%.0f hrs)" % (avg_bars, avg_bars * 4))
 
-    # Score tier breakdown
     print("\n--- By score tier ---")
     for tier_min, tier_max, label in [(80, 100, "High (80-100)"), (65, 80, "Mid (65-79)"), (50, 65, "Base (50-64)")]:
         tier_trades = [t for t in all_trades if tier_min <= t["score"] < tier_max]
@@ -435,7 +407,6 @@ def report(all_trades):
             wr = len(tier_wins) / len(tier_trades) * 100
             print("  %-18s  %3d trades  %.1f%% win rate" % (label, len(tier_trades), wr))
 
-    # Per-symbol breakdown
     print("\n--- Per symbol ---")
     print("%-10s  %5s  %5s  %5s  %6s" % ("Symbol", "Total", "Wins", "Win%", "Net-R"))
     symbols = sorted(set(t["symbol"] for t in all_trades))
@@ -449,7 +420,7 @@ def report(all_trades):
     print("\n" + "=" * 58)
     print("Note: TV pre-screener not simulated (historical data N/A)")
     print("Live win rate will be higher — TV filter eliminates ~60%%")
-    print("of weak signals before any Binance gate is applied.")
+    print("of weak signals before any gate is applied.")
     print("=" * 58 + "\n")
 
 
@@ -461,7 +432,7 @@ def main():
     all_trades = []
     for i, symbol in enumerate(COINS):
         print("[%d/%d] %s..." % (i + 1, len(COINS), symbol), end=" ", flush=True)
-        klines = fetch_klines(symbol, "4h", 540)   # 540 × 4h ≈ 90 days
+        klines = fetch_klines(symbol, "4h", 540)
         time.sleep(0.25)
 
         if not klines or len(klines) < WARMUP + 20:
