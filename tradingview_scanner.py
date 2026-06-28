@@ -25,6 +25,7 @@ INTERVAL_MAP    = {"1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
 FEAR_GREED_URL  = "https://api.alternative.me/fng/?limit=1"
 TV_SCAN_URL     = "https://scanner.tradingview.com/crypto/scan"
 TV_FOREX_URL    = "https://scanner.tradingview.com/forex/scan"
+TV_STOCKS_URL   = "https://scanner.tradingview.com/america/scan"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
@@ -231,6 +232,90 @@ def tv_scan_forex(filter_side="both", limit=30):
         return results
     except Exception as e:
         log.warning("TV forex scan error: %s" % e)
+        return []
+
+
+def tv_scan_stocks(filter_side="both", limit=30):
+    """
+    Query TradingView US stocks screener (NYSE + NASDAQ) for high-volume equity signals.
+    Only liquid stocks above $5 with >5M daily volume are considered.
+    """
+    columns = [
+        "name", "close", "change", "volume",
+        "Recommend.All", "Recommend.MA", "Recommend.Other",
+        "RSI", "RSI[1]",
+        "MACD.macd", "MACD.signal",
+        "Mom",
+        "EMA20", "EMA50", "EMA200",
+        "ATR",
+        "Stoch.K", "Stoch.D",
+        "ADX",
+        "CCI20",
+        "W.R",
+    ]
+
+    filters = [
+        {"left": "exchange", "operation": "in_range", "right": ["NYSE", "NASDAQ"]},
+        {"left": "volume",   "operation": "greater",  "right": 5000000},
+        {"left": "close",    "operation": "greater",  "right": 5},
+    ]
+
+    if filter_side == "long":
+        filters.append({"left": "Recommend.All", "operation": "greater", "right": 0.2})
+    elif filter_side == "short":
+        filters.append({"left": "Recommend.All", "operation": "less", "right": -0.2})
+
+    payload = {
+        "filter": filters,
+        "columns": columns,
+        "sort": {"sortBy": "volume", "sortOrder": "desc"},
+        "options": {"lang": "en"},
+        "range": [0, limit],
+    }
+
+    try:
+        r = requests.post(TV_STOCKS_URL, json=payload, headers=TV_HEADERS, timeout=15)
+        if r.status_code != 200:
+            log.warning("TV stocks scanner HTTP %d" % r.status_code)
+            return []
+        data = r.json().get("data", [])
+        results = []
+        for row in data:
+            sym  = row.get("s", "")
+            vals = row.get("d", [])
+            if len(vals) < len(columns): continue
+
+            clean = sym.split(":")[-1].upper()
+            if not clean: continue
+
+            results.append({
+                "symbol":      clean,
+                "tv_symbol":   sym,
+                "asset_class": "stocks",
+                "close":       vals[1]  or 0,
+                "change":      vals[2]  or 0,
+                "volume":      vals[3]  or 0,
+                "tv_rating":   vals[4]  or 0,
+                "tv_ma":       vals[5]  or 0,
+                "tv_osc":      vals[6]  or 0,
+                "rsi":         vals[7]  or 50,
+                "rsi_prev":    vals[8]  or 50,
+                "macd":        vals[9]  or 0,
+                "macd_sig":    vals[10] or 0,
+                "momentum":    vals[11] or 0,
+                "ema20":       vals[12] or 0,
+                "ema50":       vals[13] or 0,
+                "ema200":      vals[14] or 0,
+                "atr":         vals[15] or 0,
+                "stoch_k":     vals[16] or 50,
+                "stoch_d":     vals[17] or 50,
+                "adx":         vals[18] or 0,
+                "cci":         vals[19] or 0,
+                "williams_r":  vals[20] or -50,
+            })
+        return results
+    except Exception as e:
+        log.warning("TV stocks scan error: %s" % e)
         return []
 
 
@@ -509,6 +594,13 @@ def is_active_session():
     """
     hour = datetime.now(timezone.utc).hour
     return (8 <= hour < 17) or (13 <= hour < 22)   # covers 08:00-22:00 UTC
+
+
+def is_us_market_open():
+    """True during US stock market hours: 09:30-16:00 ET = 13:30-20:00 UTC."""
+    now      = datetime.now(timezone.utc)
+    time_min = now.hour * 60 + now.minute
+    return 13 * 60 + 30 <= time_min < 20 * 60
 
 
 def candle_structure(opens, closes, required=2, window=3):
@@ -1591,22 +1683,26 @@ async def main():
     await bot.send_message(
         chat_id=CHAT_ID,
         text=(
-            "TradingView Trade Setup Scanner v4 Online!\n\n"
+            "TradingView Trade Setup Scanner v5 Online!\n\n"
+            "Asset Classes: Crypto + Forex + US Stocks\n"
             "Source: TradingView + Bybit + Binance + OKX\n"
-            "Asset Classes: Crypto Futures + Forex\n"
             "Target Win Rate: 78-83%%\n\n"
-            "CRYPTO SCAN (Bybit + Binance + OKX):\n"
-            "  - Scans all 3 exchanges, deduplicates\n"
-            "  - Coins exclusive to Bybit/OKX included\n"
+            "CRYPTO (Bybit + Binance + OKX):\n"
+            "  - All 3 exchanges scanned + deduplicated\n"
             "  - 17 scoring sections + 6 hard gates\n"
-            "  - Real top-trader + taker ratios (Binance)\n"
+            "  - Real top-trader + taker ratios\n"
             "  - Cross-exchange RSI/EMA confirmation\n"
             "  - ATR Entry / SL / TP + leverage calc\n\n"
-            "FOREX SCAN (TradingView):\n"
+            "FOREX (TradingView):\n"
             "  - Major + minor FX pairs\n"
-            "  - 11 scoring sections (TV-only data)\n"
-            "  - RSI, MACD, EMA, Stoch, ADX, CCI, W%%R\n"
+            "  - 11 scoring sections (RSI, MACD, EMA,\n"
+            "    Stoch, ADX, CCI, W%%R, momentum)\n"
             "  - ATR-based Entry / SL / TP\n\n"
+            "US STOCKS (NYSE + NASDAQ):\n"
+            "  - High-volume stocks >$5 and >5M vol\n"
+            "  - Same 11-section TV scoring as forex\n"
+            "  - Only scans during market hours\n"
+            "  - (09:30-16:00 ET = 13:30-20:00 UTC)\n\n"
             "6 Hard Gates (crypto — auto-reject on fail):\n"
             "  - Daily EMA 200 (no counter-trend)\n"
             "  - ADX > 20 (trending markets only)\n"
@@ -1790,6 +1886,46 @@ async def main():
 
         except Exception as e:
             log.error("Forex scan error: %s" % e)
+
+        # ── US Stocks scan (market hours only: 13:30-20:00 UTC) ───────────────
+        if is_us_market_open():
+            try:
+                st_candidates = tv_scan_stocks(filter_side="both", limit=30)
+                log.info("TradingView stocks returned %d candidates" % len(st_candidates))
+
+                st_candidates.sort(key=lambda x: abs(x["tv_rating"]), reverse=True)
+                st_sent = 0
+
+                for tv in st_candidates:
+                    if st_sent >= 2:
+                        break
+
+                    sym  = tv["symbol"]
+                    last = seen_signals.get("ST_" + sym, 0)
+                    if time.time() - last < SIGNAL_COOLDOWN:
+                        continue
+
+                    result = score_setup_tv_only(tv, market)
+                    if result:
+                        msg = build_message_forex(result)
+                        await bot.send_message(
+                            chat_id=CHAT_ID,
+                            text=msg,
+                            disable_web_page_preview=True,
+                        )
+                        seen_signals["ST_" + sym] = time.time()
+                        st_sent += 1
+                        log.info("Stock signal: %s %s score=%d" % (
+                            sym, result["direction"], result["score"]))
+                        await asyncio.sleep(2)
+
+                if st_sent == 0:
+                    log.info("No qualifying stock setups this scan.")
+
+            except Exception as e:
+                log.error("Stocks scan error: %s" % e)
+        else:
+            log.info("US market closed — skipping stocks scan.")
 
         log.info("Next scan in %ds..." % SCAN_INTERVAL)
         await asyncio.sleep(SCAN_INTERVAL)
