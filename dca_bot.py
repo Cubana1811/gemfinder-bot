@@ -38,7 +38,7 @@ from telegram import Bot
 
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHAT_ID          = os.environ.get("CHAT_ID", "YOUR_CHAT_ID_HERE")
-BINANCE_BASE     = "https://fapi.binance.com"
+BYBIT_BASE       = "https://api.bybit.com"
 DCA_FILE         = "dca_plans.json"
 POLL_INTERVAL    = 2
 MONITOR_INTERVAL = 120   # check prices every 2 minutes
@@ -47,7 +47,7 @@ DEFAULT_RISK_PCT = 2.0
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────────────────────────────
 
 def fp(n):
     if n >= 1000: return "%.2f" % n
@@ -58,10 +58,14 @@ def fp(n):
 def get_price(symbol):
     try:
         r = requests.get(
-            "%s/fapi/v1/ticker/price?symbol=%s" % (BINANCE_BASE, symbol.upper()),
+            "%s/v5/market/tickers?category=linear&symbol=%s" % (BYBIT_BASE, symbol.upper()),
             timeout=8)
         if r.status_code == 200:
-            return float(r.json().get("price", 0))
+            data = r.json()
+            if data.get("retCode") == 0:
+                tickers = data["result"]["list"]
+                if tickers:
+                    return float(tickers[0].get("lastPrice", 0))
     except Exception:
         pass
     return 0.0
@@ -79,7 +83,7 @@ def save_plans(p):
     with open(DCA_FILE, "w") as f:
         json.dump(p, f, indent=2)
 
-# ── DCA calculator ────────────────────────────────────────────────────────────
+# ── DCA calculator ────────────────────────────────────────────────────────────────────
 
 def build_dca_plan(symbol, direction, entry, sl, tp1, account=0.0):
     risk_usd = account * DEFAULT_RISK_PCT / 100 if account > 0 else 0
@@ -190,7 +194,7 @@ def build_plan_msg(plan, show_sizes=True):
         now,
     )
 
-# ── Command handlers ──────────────────────────────────────────────────────────
+# ── Command handlers ────────────────────────────────────────────────────────────────
 
 async def handle_help(bot, chat_id):
     await bot.send_message(
@@ -294,7 +298,7 @@ async def handle_dcaclose(bot, chat_id, args):
     await bot.send_message(chat_id=chat_id,
                            text="DCA plan closed: %s" % symbol.replace("USDT", ""))
 
-# ── Price monitor ─────────────────────────────────────────────────────────────
+# ── Price monitor ─────────────────────────────────────────────────────────────────────
 
 async def price_monitor(bot):
     while True:
@@ -318,11 +322,8 @@ async def price_monitor(bot):
                     continue
 
                 ep = entry["price"]
-                # Trigger: price within 0.3% of entry level
                 near = abs(price - ep) / ep * 100 < 0.3
 
-                # For LONG: price dropped to or below entry level
-                # For SHORT: price rose to or above entry level
                 hit = (
                     (direction == "LONG"  and price <= ep * 1.003) or
                     (direction == "SHORT" and price >= ep * 0.997)
@@ -331,7 +332,7 @@ async def price_monitor(bot):
                 if hit or near:
                     level_num = entry["level"]
                     pct_str   = ["", "40%", "35%", "25%"][level_num]
-                    size_str  = ("  — $%.0f" % entry["size_usd"]) if entry["size_usd"] > 0 else ""
+                    sz_str    = ("  — $%.0f" % entry["size_usd"]) if entry["size_usd"] > 0 else ""
 
                     try:
                         await bot.send_message(
@@ -351,7 +352,7 @@ async def price_monitor(bot):
                                 "Time: %s UTC"
                             ) % (
                                 level_num, direction, coin,
-                                level_num, pct_str, size_str,
+                                level_num, pct_str, sz_str,
                                 fp(price), fp(ep),
                                 "MARKET" if level_num == 1 else "LIMIT",
                                 ("Next level: $%s\n" % fp(plan["entries"][i+1]["price"]))
@@ -370,7 +371,7 @@ async def price_monitor(bot):
         if changed:
             save_plans(plans)
 
-# ── Dispatcher ────────────────────────────────────────────────────────────────
+# ── Dispatcher ─────────────────────────────────────────────────────────────────────────
 
 async def dispatch(bot, message):
     text = (message.get("text") or "").strip()
@@ -394,7 +395,7 @@ async def dispatch(bot, message):
     elif cmd == "/dcaclose":
         await handle_dcaclose(bot, chat_id, args)
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────────────
 
 async def main():
     log.info("DCA Bot starting...")
