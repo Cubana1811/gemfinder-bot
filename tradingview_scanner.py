@@ -24,6 +24,7 @@ INTERVAL_MAP    = {"1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
                    "1d": "D", "1w": "W"}
 FEAR_GREED_URL  = "https://api.alternative.me/fng/?limit=1"
 TV_SCAN_URL     = "https://scanner.tradingview.com/crypto/scan"
+TV_FOREX_URL    = "https://scanner.tradingview.com/forex/scan"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
@@ -39,9 +40,9 @@ TV_HEADERS = {
     "Referer": "https://www.tradingview.com/",
 }
 
-def tv_scan(filter_side="both", limit=50):
+def tv_scan(filter_side="both", limit=50, exchange="BINANCE"):
     """
-    Query TradingView's public screener for BINANCE crypto futures pairs.
+    Query TradingView's public screener for crypto futures pairs on a given exchange.
     Returns a list of dicts with symbol + raw indicator values.
     """
     columns = [
@@ -70,7 +71,7 @@ def tv_scan(filter_side="both", limit=50):
     ]
 
     filters = [
-        {"left": "exchange", "operation": "equal", "right": "BINANCE"},
+        {"left": "exchange", "operation": "equal", "right": exchange},
         {"left": "typespecs", "operation": "has_none_of", "right": ["spot"]},
         {"left": "volume", "operation": "greater", "right": 10000000},
     ]
@@ -100,8 +101,8 @@ def tv_scan(filter_side="both", limit=50):
             vals = row.get("d", [])
             if len(vals) < len(columns): continue
 
-            # Normalise symbol to plain Binance futures format
-            clean = sym.replace("BINANCE:", "").replace(".P", "").replace(".F", "")
+            # Normalise symbol: strip exchange prefix and contract suffix
+            clean = sym.split(":")[-1].replace(".P", "").replace(".F", "").upper()
             if not clean.endswith("USDT"): continue
 
             results.append({
@@ -135,6 +136,101 @@ def tv_scan(filter_side="both", limit=50):
         return results
     except Exception as e:
         log.warning("TV scan error: %s" % e)
+        return []
+
+
+def tv_scan_multi_exchange(filter_side="both", limit=50):
+    """
+    Query TradingView for BINANCE + BYBIT + OKX crypto futures.
+    Deduplicates by symbol; keeps the row with the strongest TV rating.
+    """
+    seen = {}
+    for ex in ["BINANCE", "BYBIT", "OKX"]:
+        rows = tv_scan(filter_side=filter_side, limit=limit, exchange=ex)
+        for row in rows:
+            sym = row["symbol"]
+            if sym not in seen or abs(row["tv_rating"]) > abs(seen[sym]["tv_rating"]):
+                seen[sym] = row
+        time.sleep(0.5)
+    return list(seen.values())
+
+
+def tv_scan_forex(filter_side="both", limit=30):
+    """
+    Query TradingView forex screener for major/minor FX pairs.
+    Returns a list of dicts with symbol + raw TV indicator values.
+    """
+    columns = [
+        "name", "close", "change", "volume",
+        "Recommend.All", "Recommend.MA", "Recommend.Other",
+        "RSI", "RSI[1]",
+        "MACD.macd", "MACD.signal",
+        "Mom",
+        "EMA20", "EMA50", "EMA200",
+        "ATR",
+        "Stoch.K", "Stoch.D",
+        "ADX",
+        "CCI20",
+        "W.R",
+    ]
+
+    filters = []
+    if filter_side == "long":
+        filters.append({"left": "Recommend.All", "operation": "greater", "right": 0.2})
+    elif filter_side == "short":
+        filters.append({"left": "Recommend.All", "operation": "less", "right": -0.2})
+
+    payload = {
+        "filter": filters,
+        "columns": columns,
+        "sort": {"sortBy": "Recommend.All", "sortOrder": "desc"},
+        "options": {"lang": "en"},
+        "range": [0, limit],
+    }
+
+    try:
+        r = requests.post(TV_FOREX_URL, json=payload, headers=TV_HEADERS, timeout=15)
+        if r.status_code != 200:
+            log.warning("TV forex scanner HTTP %d" % r.status_code)
+            return []
+        data = r.json().get("data", [])
+        results = []
+        for row in data:
+            sym  = row.get("s", "")
+            vals = row.get("d", [])
+            if len(vals) < len(columns): continue
+
+            clean = sym.split(":")[-1].upper()
+            if not clean or len(clean) < 6: continue
+
+            results.append({
+                "symbol":      clean,
+                "tv_symbol":   sym,
+                "asset_class": "forex",
+                "close":       vals[1]  or 0,
+                "change":      vals[2]  or 0,
+                "volume":      vals[3]  or 0,
+                "tv_rating":   vals[4]  or 0,
+                "tv_ma":       vals[5]  or 0,
+                "tv_osc":      vals[6]  or 0,
+                "rsi":         vals[7]  or 50,
+                "rsi_prev":    vals[8]  or 50,
+                "macd":        vals[9]  or 0,
+                "macd_sig":    vals[10] or 0,
+                "momentum":    vals[11] or 0,
+                "ema20":       vals[12] or 0,
+                "ema50":       vals[13] or 0,
+                "ema200":      vals[14] or 0,
+                "atr":         vals[15] or 0,
+                "stoch_k":     vals[16] or 50,
+                "stoch_d":     vals[17] or 50,
+                "adx":         vals[18] or 0,
+                "cci":         vals[19] or 0,
+                "williams_r":  vals[20] or -50,
+            })
+        return results
+    except Exception as e:
+        log.warning("TV forex scan error: %s" % e)
         return []
 
 
@@ -188,9 +284,20 @@ def fetch_oi_change(symbol):
     return 0.0
 
 def fetch_top_trader_ratio(symbol):
+    data = safe_get("%s/futures/data/topLongShortPositionRatio?symbol=%s&period=1h&limit=1" % (
+        BINANCE_BASE, symbol))
+    if data and isinstance(data, list) and data:
+        return float(data[-1].get("longShortRatio", 1.0))
     return 1.0
 
 def fetch_taker_ratio(symbol):
+    data = safe_get("%s/futures/data/takerlongshortRatio?symbol=%s&period=1h&limit=1" % (
+        BINANCE_BASE, symbol))
+    if data and isinstance(data, list) and data:
+        entry = data[-1]
+        buy_vol  = float(entry.get("buyVol",  1))
+        sell_vol = float(entry.get("sellVol", 1))
+        return round(buy_vol / sell_vol, 3) if sell_vol > 0 else 1.0
     return 1.0
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -1004,6 +1111,211 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     }
 
 # ════════════════════════════════════════════════════════════════════════════════
+# TV-ONLY SCORING (forex / stocks — no exchange klines needed)
+# ════════════════════════════════════════════════════════════════════════════════
+
+def score_setup_tv_only(tv, market):
+    """
+    Score a forex/stock setup using only TradingView pre-computed indicators.
+    No exchange klines required — all data comes from the TV screener dict.
+    Returns a result dict or None.
+    """
+    tv_rating = tv["tv_rating"]
+    tv_ma     = tv["tv_ma"]
+    tv_osc    = tv["tv_osc"]
+    rsi_val   = tv["rsi"]
+    rsi_prev  = tv["rsi_prev"]
+    macd_val  = tv["macd"]
+    macd_sig  = tv["macd_sig"]
+    mom       = tv["momentum"]
+    ema20     = tv["ema20"]
+    ema50     = tv["ema50"]
+    ema200    = tv["ema200"]
+    atr_val   = tv["atr"]
+    stoch_k   = tv["stoch_k"]
+    stoch_d   = tv["stoch_d"]
+    adx_val   = tv["adx"]
+    cci_val   = tv["cci"]
+    wr_val    = tv["williams_r"]
+    price     = tv["close"]
+
+    if price == 0 or atr_val == 0:
+        return None
+
+    # ADX gate: skip choppy markets
+    if adx_val < 20:
+        return None
+
+    fear_greed = market.get("fear_greed", 50)
+    long_score  = 0
+    short_score = 0
+    long_reasons  = []
+    short_reasons = []
+
+    # 1. TV Overall rating (max 35)
+    if tv_rating >= 0.5:
+        long_score += 35; long_reasons.append("TV STRONG BUY (%.2f)" % tv_rating)
+    elif tv_rating >= 0.2:
+        long_score += 20; long_reasons.append("TV BUY (%.2f)" % tv_rating)
+    elif tv_rating >= 0.1:
+        long_score += 10
+    if tv_rating <= -0.5:
+        short_score += 35; short_reasons.append("TV STRONG SELL (%.2f)" % tv_rating)
+    elif tv_rating <= -0.2:
+        short_score += 20; short_reasons.append("TV SELL (%.2f)" % tv_rating)
+    elif tv_rating <= -0.1:
+        short_score += 10
+
+    # 2. TV MA sub-score (max 10)
+    if tv_ma >= 0.3:
+        long_score += 10; long_reasons.append("MA bullish (%.2f)" % tv_ma)
+    elif tv_ma <= -0.3:
+        short_score += 10; short_reasons.append("MA bearish (%.2f)" % tv_ma)
+
+    # 3. TV Oscillator sub-score (max 10)
+    if tv_osc >= 0.3:
+        long_score += 10; long_reasons.append("Oscillators bullish (%.2f)" % tv_osc)
+    elif tv_osc <= -0.3:
+        short_score += 10; short_reasons.append("Oscillators bearish (%.2f)" % tv_osc)
+
+    # 4. RSI (max 15)
+    if rsi_val < 30:
+        long_score += 12; long_reasons.append("RSI oversold (%.1f)" % rsi_val)
+    elif rsi_val < 40:
+        long_score += 6;  long_reasons.append("RSI low (%.1f)" % rsi_val)
+    if rsi_val > 70:
+        short_score += 12; short_reasons.append("RSI overbought (%.1f)" % rsi_val)
+    elif rsi_val > 60:
+        short_score += 6;  short_reasons.append("RSI high (%.1f)" % rsi_val)
+    if rsi_val > rsi_prev and rsi_val < 50 and tv_rating > 0:
+        long_score += 3
+    if rsi_val < rsi_prev and rsi_val > 50 and tv_rating < 0:
+        short_score += 3
+
+    # 5. MACD (max 12)
+    macd_hist_val = macd_val - macd_sig
+    if macd_hist_val > 0:
+        long_score += 12; long_reasons.append("MACD bullish")
+    elif macd_hist_val < 0:
+        short_score += 12; short_reasons.append("MACD bearish")
+
+    # 6. EMA alignment (max 15)
+    if ema20 and ema50 and ema200 and price > 0:
+        if price > ema20 > ema50 > ema200:
+            long_score += 15; long_reasons.append("EMA 20>50>200 bullish stack")
+        elif price > ema20 > ema50:
+            long_score += 8;  long_reasons.append("EMA 20 > 50 bullish")
+        if price < ema20 < ema50 < ema200:
+            short_score += 15; short_reasons.append("EMA 20<50<200 bearish stack")
+        elif price < ema20 < ema50:
+            short_score += 8;  short_reasons.append("EMA 20 < 50 bearish")
+
+    # 7. ADX trend strength (max 10)
+    if adx_val >= 35:
+        long_score  += 10; long_reasons.append("ADX %.1f — very strong trend" % adx_val)
+        short_score += 10; short_reasons.append("ADX %.1f — very strong trend" % adx_val)
+    elif adx_val >= 25:
+        long_score  += 5;  long_reasons.append("ADX %.1f — trending" % adx_val)
+        short_score += 5;  short_reasons.append("ADX %.1f — trending" % adx_val)
+
+    # 8. Stochastic (max 8)
+    if stoch_k < 20 and stoch_d < 20:
+        long_score += 8; long_reasons.append("Stoch oversold K=%.1f D=%.1f" % (stoch_k, stoch_d))
+    elif stoch_k > 80 and stoch_d > 80:
+        short_score += 8; short_reasons.append("Stoch overbought K=%.1f D=%.1f" % (stoch_k, stoch_d))
+
+    # 9. Williams %R (max 5)
+    if wr_val < -80:
+        long_score += 5; long_reasons.append("Williams %%R oversold (%.1f)" % wr_val)
+    elif wr_val > -20:
+        short_score += 5; short_reasons.append("Williams %%R overbought (%.1f)" % wr_val)
+
+    # 10. Momentum (max 5)
+    if mom > 0 and tv_rating > 0:
+        long_score += 5; long_reasons.append("Positive momentum")
+    elif mom < 0 and tv_rating < 0:
+        short_score += 5; short_reasons.append("Negative momentum")
+
+    # 11. CCI (max 5)
+    if cci_val < -100:
+        long_score += 5; long_reasons.append("CCI oversold (%.0f)" % cci_val)
+    elif cci_val > 100:
+        short_score += 5; short_reasons.append("CCI overbought (%.0f)" % cci_val)
+
+    # ── Normalise to 100 (max raw = 130) ────────────────────────────────────
+    max_pts = 130
+    long_pct  = min(int(long_score  / max_pts * 100), 100)
+    short_pct = min(int(short_score / max_pts * 100), 100)
+
+    if long_pct >= MIN_SCORE and long_pct > short_pct + 8:
+        direction = "LONG"
+        final     = long_pct
+        reasons   = long_reasons[:6]
+    elif short_pct >= MIN_SCORE and short_pct > long_pct + 8:
+        direction = "SHORT"
+        final     = short_pct
+        reasons   = short_reasons[:6]
+    else:
+        return None
+
+    # ATR-based levels
+    if direction == "LONG":
+        entry = price
+        sl    = entry - atr_val * 1.5
+        tp1   = entry + atr_val * 1.2
+        tp2   = entry + atr_val * 2.5
+        tp3   = entry + atr_val * 4.0
+    else:
+        entry = price
+        sl    = entry + atr_val * 1.5
+        tp1   = entry - atr_val * 1.2
+        tp2   = entry - atr_val * 2.5
+        tp3   = entry - atr_val * 4.0
+
+    risk   = abs(entry - sl)
+    reward = abs(tp2 - entry)
+    rr     = reward / risk if risk > 0 else 0
+
+    if rr < MIN_RR:
+        return None
+
+    if final >= 88:   tier = "S-TIER (PREMIUM)"
+    elif final >= 80: tier = "A-TIER (HIGH CONF)"
+    else:             tier = "B-TIER (STANDARD)"
+
+    return {
+        "symbol":        tv["symbol"],
+        "asset_class":   tv.get("asset_class", "forex"),
+        "direction":     direction,
+        "score":         final,
+        "tier":          tier,
+        "price":         price,
+        "entry":         entry,
+        "sl":            sl,
+        "tp1":           tp1,
+        "tp2":           tp2,
+        "tp3":           tp3,
+        "rr":            rr,
+        "atr":           atr_val,
+        "tv_rating":     tv_rating,
+        "tv_rating_lbl": tv_rating_label(tv_rating),
+        "tv_ma":         tv_ma,
+        "tv_osc":        tv_osc,
+        "rsi":           rsi_val,
+        "adx":           adx_val,
+        "stoch_k":       stoch_k,
+        "stoch_d":       stoch_d,
+        "ema20":         ema20,
+        "ema50":         ema50,
+        "ema200":        ema200,
+        "macd_hist":     macd_hist_val,
+        "change_24h":    tv["change"],
+        "fear_greed":    fear_greed,
+        "reasons":       reasons,
+    }
+
+
+# ════════════════════════════════════════════════════════════════════════════════
 # MESSAGE BUILDER
 # ════════════════════════════════════════════════════════════════════════════════
 
@@ -1170,6 +1482,104 @@ def build_message(s):
         datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
     )
 
+def build_message_forex(s):
+    tier_icon = {
+        "S-TIER (PREMIUM)":  "[S]",
+        "A-TIER (HIGH CONF)":"[A]",
+        "B-TIER (STANDARD)": "[B]",
+    }.get(s["tier"], "[?]")
+
+    score_bar = "#" * round(s["score"] / 10) + "-" * (10 - round(s["score"] / 10))
+    dir_label    = "LONG" if s["direction"] == "LONG" else "SHORT"
+    asset_class  = s.get("asset_class", "FOREX").upper()
+
+    fg_label = (
+        "Extreme Fear" if s["fear_greed"] < 25 else
+        "Fear"         if s["fear_greed"] < 45 else
+        "Neutral"      if s["fear_greed"] < 55 else
+        "Greed"        if s["fear_greed"] < 75 else
+        "Extreme Greed"
+    )
+
+    sl_pct  = abs(s["entry"] - s["sl"])  / s["entry"] * 100 if s["entry"] else 0
+    tp1_pct = abs(s["tp1"]  - s["entry"]) / s["entry"] * 100 if s["entry"] else 0
+    tp2_pct = abs(s["tp2"]  - s["entry"]) / s["entry"] * 100 if s["entry"] else 0
+    tp3_pct = abs(s["tp3"]  - s["entry"]) / s["entry"] * 100 if s["entry"] else 0
+
+    reasons_text = "\n".join(["  [+] " + r for r in s["reasons"]])
+
+    return (
+        "%s %s SIGNAL | %s\n"
+        "Pair:  %s  |  Score: %d/100\n"
+        "Tier:  %s\n"
+        "[%s]\n"
+        "\n"
+        "=== TRADINGVIEW RATING ===\n"
+        "Overall:     %s  (%.2f)\n"
+        "MA Rating:   %.2f  |  Oscillators: %.2f\n"
+        "\n"
+        "=== TRADE SETUP ===\n"
+        "Direction:  %s\n"
+        "Entry:      %s\n"
+        "Stop Loss:  %s  (-%.2f%%)\n"
+        "TP1:        %s  (+%.2f%%)  [take 40%%]\n"
+        "TP2:        %s  (+%.2f%%)  [take 35%%]\n"
+        "TP3:        %s  (+%.2f%%)  [let 25%% run]\n"
+        "R/R Ratio:  %.2fx\n"
+        "\n"
+        "=== TECHNICAL CONFIRMATION ===\n"
+        "RSI:    %.1f\n"
+        "ADX:    %.1f  (%s)\n"
+        "Stoch:  K=%.1f  D=%.1f\n"
+        "EMA 20: %s  |  EMA 50: %s\n"
+        "EMA 200: %s\n"
+        "MACD:   %s\n"
+        "\n"
+        "=== WHY THIS TRADE ===\n"
+        "%s\n"
+        "\n"
+        "=== MARKET CONTEXT ===\n"
+        "Fear/Greed: %d (%s)\n"
+        "Pair 24h:   %+.2f%%\n"
+        "\n"
+        "=== RISK RULES ===\n"
+        "- Set SL immediately on entry — no exceptions\n"
+        "- Move SL to breakeven once TP1 is hit\n"
+        "- Risk 1-2%% of account per trade max\n"
+        "- Never chase if entry zone passes\n"
+        "\n"
+        "Time: %s UTC\n"
+        "Source: TradingView %s Screener\n"
+        "Not financial advice - DYOR!"
+    ) % (
+        tier_icon, dir_label, asset_class,
+        s["symbol"], s["score"],
+        s["tier"],
+        score_bar,
+        s["tv_rating_lbl"], s["tv_rating"],
+        s["tv_ma"], s["tv_osc"],
+        dir_label,
+        fp(s["entry"]),
+        fp(s["sl"]),   sl_pct,
+        fp(s["tp1"]),  tp1_pct,
+        fp(s["tp2"]),  tp2_pct,
+        fp(s["tp3"]),  tp3_pct,
+        s["rr"],
+        s["rsi"],
+        s["adx"],
+        "Strong Trend" if s["adx"] >= 35 else "Trending" if s["adx"] >= 25 else "Weak",
+        s["stoch_k"], s["stoch_d"],
+        fp(s["ema20"]), fp(s["ema50"]),
+        fp(s["ema200"]),
+        "Bullish" if s["macd_hist"] > 0 else "Bearish",
+        reasons_text,
+        s["fear_greed"], fg_label,
+        s["change_24h"],
+        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+        asset_class,
+    )
+
+
 # ════════════════════════════════════════════════════════════════════════════════
 # MAIN SCAN LOOP
 # ════════════════════════════════════════════════════════════════════════════════
@@ -1181,42 +1591,29 @@ async def main():
     await bot.send_message(
         chat_id=CHAT_ID,
         text=(
-            "TradingView Trade Setup Scanner v3 Online!\n\n"
+            "TradingView Trade Setup Scanner v4 Online!\n\n"
             "Source: TradingView + Bybit + Binance + OKX\n"
+            "Asset Classes: Crypto Futures + Forex\n"
             "Target Win Rate: 78-83%%\n\n"
-            "Method:\n"
-            "  1. TV screener finds top BUY/SELL signals\n"
-            "  2. 6 hard gates filter weak setups out\n"
-            "  3. 17 scoring sections confirm quality\n"
-            "  4. Order flow data validates smart money\n"
-            "  5. ATR Entry / SL / TP + leverage calculated\n\n"
-            "Indicators (17 scoring sections):\n"
-            "  - TradingView Overall + MA + Oscillator\n"
-            "  - RSI (1h + 4h + Daily)\n"
-            "  - MACD (1h + 4h)\n"
-            "  - EMA 21 / 50 / 200 stack alignment\n"
-            "  - Market Structure (Daily + 4h + 1h)\n"
-            "  - S/R zones (3-touch minimum)\n"
-            "  - Volume spike / ADX trend strength\n"
-            "  - Fear & Greed + BTC correlation\n"
-            "  - BB squeeze breakout\n"
-            "  - SMC liquidity sweep (ICT)\n"
-            "  - OI confirmation\n"
-            "  - Top-trader L/S ratio (smart money)\n"
-            "  - Taker buy/sell ratio (conviction)\n"
-            "  - Order book bid/ask imbalance\n"
-            "  [NEW] Binance cross-exchange confirmation\n"
-            "  [NEW] OKX cross-exchange confirmation\n"
-            "  [NEW] Avg funding across 3 exchanges\n\n"
-            "6 Hard Gates (auto-reject on fail):\n"
+            "CRYPTO SCAN (Bybit + Binance + OKX):\n"
+            "  - Scans all 3 exchanges, deduplicates\n"
+            "  - Coins exclusive to Bybit/OKX included\n"
+            "  - 17 scoring sections + 6 hard gates\n"
+            "  - Real top-trader + taker ratios (Binance)\n"
+            "  - Cross-exchange RSI/EMA confirmation\n"
+            "  - ATR Entry / SL / TP + leverage calc\n\n"
+            "FOREX SCAN (TradingView):\n"
+            "  - Major + minor FX pairs\n"
+            "  - 11 scoring sections (TV-only data)\n"
+            "  - RSI, MACD, EMA, Stoch, ADX, CCI, W%%R\n"
+            "  - ATR-based Entry / SL / TP\n\n"
+            "6 Hard Gates (crypto — auto-reject on fail):\n"
             "  - Daily EMA 200 (no counter-trend)\n"
             "  - ADX > 20 (trending markets only)\n"
             "  - Candle structure (2/3 closes align)\n"
             "  - Funding rate (< +-0.05%% gate)\n"
             "  - London/NY session only (08-22 UTC)\n"
             "  - BTC spike pause (>2%% on 15m)\n\n"
-            "Leverage: ATR volatility-adjusted\n"
-            "Sizing:   2%% account risk rule\n\n"
             "Min Score: %d/100  |  Min R/R: %.1fx\n"
             "Scan every: %ds\n\n"
             "Not financial advice - DYOR!"
@@ -1250,8 +1647,8 @@ async def main():
             continue
 
         try:
-            candidates = tv_scan(filter_side="both", limit=60)
-            log.info("TradingView returned %d candidates" % len(candidates))
+            candidates = tv_scan_multi_exchange(filter_side="both", limit=50)
+            log.info("TradingView returned %d candidates across 3 exchanges" % len(candidates))
 
             candidates.sort(key=lambda x: abs(x["tv_rating"]), reverse=True)
 
@@ -1356,6 +1753,43 @@ async def main():
 
         except Exception as e:
             log.error("Scan error: %s" % e)
+
+        # ── Forex scan ────────────────────────────────────────────────────────
+        try:
+            fx_candidates = tv_scan_forex(filter_side="both", limit=30)
+            log.info("TradingView forex returned %d candidates" % len(fx_candidates))
+
+            fx_candidates.sort(key=lambda x: abs(x["tv_rating"]), reverse=True)
+            fx_sent = 0
+
+            for tv in fx_candidates:
+                if fx_sent >= 2:
+                    break
+
+                sym  = tv["symbol"]
+                last = seen_signals.get("FX_" + sym, 0)
+                if time.time() - last < SIGNAL_COOLDOWN:
+                    continue
+
+                result = score_setup_tv_only(tv, market)
+                if result:
+                    msg = build_message_forex(result)
+                    await bot.send_message(
+                        chat_id=CHAT_ID,
+                        text=msg,
+                        disable_web_page_preview=True,
+                    )
+                    seen_signals["FX_" + sym] = time.time()
+                    fx_sent += 1
+                    log.info("Forex signal: %s %s score=%d" % (
+                        sym, result["direction"], result["score"]))
+                    await asyncio.sleep(2)
+
+            if fx_sent == 0:
+                log.info("No qualifying forex setups this scan.")
+
+        except Exception as e:
+            log.error("Forex scan error: %s" % e)
 
         log.info("Next scan in %ds..." % SCAN_INTERVAL)
         await asyncio.sleep(SCAN_INTERVAL)
