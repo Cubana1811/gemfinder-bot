@@ -140,7 +140,7 @@ def tv_scan(filter_side="both", limit=50, exchange="BINANCE"):
         return []
 
 
-def tv_scan_multi_exchange(filter_side="both", limit=50):
+def tv_scan_multi_exchange(filter_side="both", limit=100):
     """
     Query TradingView for BINANCE + BYBIT + OKX crypto futures.
     Deduplicates by symbol; keeps the row with the strongest TV rating.
@@ -1743,7 +1743,7 @@ async def main():
             continue
 
         try:
-            candidates = tv_scan_multi_exchange(filter_side="both", limit=50)
+            candidates = tv_scan_multi_exchange(filter_side="both", limit=100)
             log.info("TradingView returned %d candidates across 3 exchanges" % len(candidates))
 
             candidates.sort(key=lambda x: abs(x["tv_rating"]), reverse=True)
