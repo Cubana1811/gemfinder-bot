@@ -1077,7 +1077,9 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
         short_score += 3
 
     # ── Normalise to 100 ────────────────────────────────────────────────────────
-    max_pts = 228
+    # 180 = realistic max for a strong signal without rare events (BB squeeze /
+    # liquidity sweep). Scores above 180 are capped at 100 by min(..., 100).
+    max_pts = 180
     long_pct  = min(int(long_score  / max_pts * 100), 100)
     short_pct = min(int(short_score / max_pts * 100), 100)
 
@@ -1763,7 +1765,7 @@ async def main():
                     # ── Primary data (Bybit) ─────────────────────────────────
                     k1h      = fetch_klines(symbol, "1h",  200); time.sleep(0.15)
                     k4h      = fetch_klines(symbol, "4h",  150); time.sleep(0.15)
-                    k1d      = fetch_klines(symbol, "1d",   60); time.sleep(0.15)
+                    k1d      = fetch_klines(symbol, "1d",  250); time.sleep(0.15)
                     funding  = fetch_funding_rate(symbol);       time.sleep(0.10)
                     oi_chg   = fetch_oi_change(symbol);          time.sleep(0.10)
                     ob_imbal = fetch_order_book_imbalance(symbol); time.sleep(0.10)
