@@ -153,46 +153,35 @@ print(f"\\n✅  Ready  |  Device: {DEVICE.upper()}")
 """)
 
 CELL_SCRIPT = code("""\
-# ── STEP 3: PASTE YOUR DARK FILES SCRIPT HERE ───────────────────
-#
-#  ✏️  Replace the example below with your full episode script.
-#  Each paragraph becomes one scene.  Longer paragraph = longer clip.
+# ── STEP 3: Episode Settings & Upload Script ─────────────────────
+# 1. Edit EPISODE_TITLE and voice below.
+# 2. Run this cell.
+# 3. Click Choose Files and select your script as a plain .txt file.
+#    Your script can contain any characters (dashes, quotes, etc.)
 # ─────────────────────────────────────────────────────────────────
 
-EPISODE_TITLE = "The Classified Files"
+EPISODE_TITLE  = "The Classified Files"   # <- change this
 
-YOUR_SCRIPT = \"\"\"
-In the summer of 1984, a small town in rural Ohio reported something that would be buried
-for decades. Three witnesses saw lights hovering above the forest. By morning, six square
-miles of trees were dead. The government arrived within hours.
+# Voice options (uncomment one)
+VOICE          = "en-US-GuyNeural"        # Deep authoritative male  <- DEFAULT
+# VOICE        = "en-US-EricNeural"       # Serious male narrator
+# VOICE        = "en-US-ChristopherNeural"# Calm, grave male voice
+# VOICE        = "en-GB-RyanNeural"       # British male (BBC documentary feel)
 
-The official explanation was a chemical spill from a nearby plant. But the plant had been
-closed for two years. Not a single employee was interviewed. Not a single sample was tested.
-The report was sealed before the week was out.
+SPEAKING_RATE  = "-10%"
+SPEAKING_PITCH = "-3Hz"
 
-The local newspaper editor who first broke the story disappeared three weeks later. His files
-were gone. His sources went silent. The case was never opened.
-
-What really happened in Millbrook that night has never been explained. The documents we have
-obtained tell a very different story — one the government has spent forty years trying to erase.
-\"\"\"
-
-# ── Voice options ────────────────────────────────────────────────
-# Uncomment one voice (GuyNeural is the default Dark Files voice)
-VOICE         = "en-US-GuyNeural"        # Deep authoritative male  ← DEFAULT
-# VOICE       = "en-US-EricNeural"       # Serious male narrator
-# VOICE       = "en-US-ChristopherNeural"# Calm, grave male voice
-# VOICE       = "en-GB-RyanNeural"       # British male (BBC documentary feel)
-
-SPEAKING_RATE  = "-10%"    # Slower = more dramatic
-SPEAKING_PITCH = "-3Hz"    # Slightly deeper tone
-
-# ─────────────────────────────────────────────────────────────────
+# ── Upload script ────────────────────────────────────────────────
+from google.colab import files as _gcf
+print(f"Episode: {EPISODE_TITLE}")
+print(f"Voice  : {VOICE}")
+print("\\nClick Choose Files below and select your script as a .txt file...")
+_up = _gcf.upload()
+if not _up:
+    raise RuntimeError("No file uploaded. Run this cell again.")
+YOUR_SCRIPT = list(_up.values())[0].decode("utf-8", errors="replace").strip()
 words = len(YOUR_SCRIPT.split())
-print(f"📺  Episode    : {EPISODE_TITLE}")
-print(f"🎙️   Voice      : {VOICE}")
-print(f"📝  Words      : {words}")
-print(f"⏱️   Est. length: ~{words / (110/60):.0f} seconds  ({words / (110/60) / 60:.1f} min)")
+print(f"\\nScript loaded: {words} words  (~{words / (110/60):.0f}s  {words / (110/60) / 60:.1f} min)")
 """)
 
 CELL_PARSER = code("""\
@@ -392,12 +381,12 @@ print(f"    VRAM used: {torch.cuda.memory_allocated()/1e9:.2f} GB / 16 GB")
 """)
 
 CELL_GEN_CLIPS = code("""\
-# ── STEP 7: Generate cinematic images + Ken Burns motion clips ───
+# ── STEP 7: Generate cinematic images + Ken Burns clips (audio-synced) ───────
 #
-#  Stable Diffusion generates one dark cinematic image per scene.
-#  FFmpeg applies Ken Burns pan/zoom to turn each image into video.
-#  Fast, memory-safe, cinematic results.
-# ─────────────────────────────────────────────────────────────────
+#  SDXL generates one dark cinematic image per scene.
+#  Each clip embeds its own voiceover audio via -shortest so the video
+#  is mathematically exactly as long as the audio — no drift, no lag.
+# ─────────────────────────────────────────────────────────────────────────────
 import time
 
 KEN_BURNS = [
@@ -420,23 +409,28 @@ def gen_image(prompt, neg, img_path, seed=0):
     ).images[0]
     img.save(img_path)
 
-def image_to_video(img_path, out_path, duration, effect_idx=0):
+def image_to_clip(img_path, audio_path, out_path, duration, effect_idx=0):
     fps    = 25
-    frames = int(duration * fps) + 2
+    frames = max(int(duration * fps) + 1, 2)
     effect = KEN_BURNS[effect_idx % len(KEN_BURNS)]
+    # Embed voiceover audio in the clip. -shortest cuts video to exact audio length.
     subprocess.run([
-        'ffmpeg', '-loop', '1', '-i', img_path,
-        '-vf', f"{effect}:d={frames}:s=1024x576,fps={fps}",
-        '-t', str(duration),
+        'ffmpeg', '-y',
+        '-loop', '1', '-i', img_path,
+        '-i', audio_path,
+        '-filter_complex', f'[0:v]{effect}:d={frames}:s=1024x576,fps={fps}[v]',
+        '-map', '[v]', '-map', '1:a',
         '-c:v', 'libx264', '-crf', '18', '-preset', 'fast',
-        '-pix_fmt', 'yuv420p', out_path, '-y'
+        '-c:a', 'aac', '-b:a', '192k',
+        '-pix_fmt', 'yuv420p', '-shortest',
+        out_path
     ], capture_output=True, check=True)
 
 print(f"Generating {len(scenes)} cinematic clips ...\\n{'='*65}")
 clip_paths = []
 t0 = time.time()
 
-for i, (scene, dur) in enumerate(zip(scenes, durations)):
+for i, (scene, dur, ap) in enumerate(zip(scenes, durations, audio_paths)):
     img_path = f'/content/dark_files/clips/scene_{i:03d}.png'
     out_path = f'/content/dark_files/clips/clip_{i:03d}.mp4'
     prompt, neg = make_prompt(scene)
@@ -446,7 +440,7 @@ for i, (scene, dur) in enumerate(zip(scenes, durations)):
 
     t1 = time.time()
     gen_image(prompt, neg, img_path, seed=i * 17 + 42)
-    image_to_video(img_path, out_path, dur, effect_idx=i)
+    image_to_clip(img_path, ap, out_path, dur, effect_idx=i)
     clip_paths.append(out_path)
 
     elapsed = time.time() - t1
@@ -460,13 +454,13 @@ print(f"\\nAll clips done! Total: {(time.time()-t0)/60:.1f} min")
 CELL_MUSIC = code("""\
 # ── STEP 8: Generate dark ambient background music ───────────────
 from transformers import pipeline as hf_pipeline
-import scipy.io.wavfile as wav
+import wave, numpy as np
 
-# Free GPU memory from video model first
+# Free GPU memory from image model first
 del pipe
 torch.cuda.empty_cache()
 
-print("🎵  Loading MusicGen-small ...")
+print("Loading MusicGen-small ...")
 music_pipe = hf_pipeline(
     'text-to-audio',
     'facebook/musicgen-small',
@@ -479,13 +473,24 @@ MUSIC_PROMPT = (
     "psychological thriller, minimal slow tempo, no vocals, instrumental only, eerie"
 )
 
-print("🎵  Generating 30-second dark ambient loop ...")
+print("Generating dark ambient loop ...")
 music = music_pipe(MUSIC_PROMPT, forward_params={"do_sample": True, "max_new_tokens": 1500})
 
 # Handle both list and dict output formats across transformers versions
 audio_data = music[0] if isinstance(music, list) else music
+sr         = audio_data['sampling_rate']
+_arr       = audio_data['audio']
+if _arr.ndim == 2:
+    _arr = _arr.mean(axis=0)   # stereo -> mono
+_pcm = (_arr * 32767).clip(-32768, 32767).astype(np.int16)
+
+# Write WAV using built-in wave module — no scipy dependency
 raw_wav = '/content/dark_files/audio/music_raw.wav'
-wav.write(raw_wav, audio_data['sampling_rate'], audio_data['audio'].T)
+with wave.open(raw_wav, 'w') as _wf:
+    _wf.setnchannels(1)
+    _wf.setsampwidth(2)
+    _wf.setframerate(sr)
+    _wf.writeframes(_pcm.tobytes())
 
 # Loop to match full video duration + fade out
 music_wav = '/content/dark_files/audio/music_final.wav'
@@ -499,66 +504,47 @@ subprocess.run([
 
 del music_pipe
 torch.cuda.empty_cache()
-print(f"✅  Music ready  ({total_duration:.0f}s, fades out at end)")
+print(f"Music ready ({total_duration:.0f}s, fades out at end)")
 """)
 
 CELL_ASSEMBLE = code("""\
 # ── STEP 9: Assemble clips with fade transitions ─────────────────
+#  Each clip already carries its own voiceover audio (embedded in Step 7).
+#  We apply fades, concatenate, then feed into color grade.
 
 def add_fades(src, dst, dur, fade_dur=0.4):
-    \"\"\"Add fade-in + fade-out to a clip.\"\"\"
     fade_out_start = max(0, dur - fade_dur)
     subprocess.run([
-        'ffmpeg', '-i', src,
+        'ffmpeg', '-y', '-i', src,
         '-vf', (f'fade=t=in:st=0:d={fade_dur},'
                 f'fade=t=out:st={fade_out_start:.2f}:d={fade_dur}'),
-        '-c:v', 'libx264', '-crf', '18', '-preset', 'fast',
-        '-pix_fmt', 'yuv420p', dst, '-y'
+        '-c:v', 'libx264', '-crf', '18', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+        '-c:a', 'copy',   # preserve audio stream — already synced
+        dst
     ], capture_output=True, check=True)
 
-print("✂️   Adding fade transitions to each clip ...")
+print("Adding fade transitions to each clip ...")
 faded_paths = []
 for i, (cp, dur) in enumerate(zip(clip_paths, durations)):
     fp = f'/content/dark_files/clips/clip_{i:03d}_faded.mp4'
     add_fades(cp, fp, dur)
     faded_paths.append(fp)
-    print(f"  ✅  Clip {i+1}/{len(scenes)} — fade in/out applied")
+    print(f"  Clip {i+1}/{len(scenes)} faded")
 
-# Concatenate all faded clips
+# Concatenate all faded clips — audio (voiceover) is already embedded per clip
 concat_list = '/content/dark_files/concat.txt'
 with open(concat_list, 'w') as f:
     for p in faded_paths:
         f.write(f"file '{p}'\\n")
 
-raw_video = '/content/dark_files/final/video_raw.mp4'
+video_with_voice = '/content/dark_files/final/video_raw.mp4'
 subprocess.run([
-    'ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_list,
+    'ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_list,
     '-c:v', 'libx264', '-crf', '17', '-preset', 'fast', '-pix_fmt', 'yuv420p',
-    raw_video, '-y'
+    '-c:a', 'aac', '-b:a', '192k',
+    video_with_voice
 ], capture_output=True, check=True)
-print("\\n✅  Clips concatenated")
-
-# Concatenate all voiceover segments
-audio_list = '/content/dark_files/audio_concat.txt'
-with open(audio_list, 'w') as f:
-    for p in audio_paths:
-        f.write(f"file '{p}'\\n")
-
-full_voice = '/content/dark_files/audio/voice_full.mp3'
-subprocess.run([
-    'ffmpeg', '-f', 'concat', '-safe', '0', '-i', audio_list,
-    '-c:a', 'copy', full_voice, '-y'
-], capture_output=True, check=True)
-
-# Merge video + voiceover
-video_with_voice = '/content/dark_files/final/video_voiced.mp4'
-subprocess.run([
-    'ffmpeg', '-i', raw_video, '-i', full_voice,
-    '-map', '0:v', '-map', '1:a',
-    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
-    '-shortest', video_with_voice, '-y'
-], capture_output=True, check=True)
-print("✅  Voiceover merged")
+print("\\nAll clips assembled — voiceover perfectly synced to each scene.")
 """)
 
 CELL_GRADE = code("""\
