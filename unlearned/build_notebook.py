@@ -24,28 +24,45 @@ def code(src):
 # ── CELLS ──────────────────────────────────────────────────────────────────────
 
 CELL_TITLE = md("""\
-# UNLEARNED — Flat Icon Video Generator
+# UNLEARNED — Video Generator
 ### Psychology · Ancient History · Behavioral Science
 ---
-Generates a clean flat-icon image for every scene — white background, bold caption, perfectly synced voiceover.
 
-Icons are fetched automatically from the Iconify library (150 k+ free icons). No GPU needed. No AI model download.
+## Choose your path after Cell 5:
 
-**Run cells in order — any runtime type works (CPU is fine):**
+### 🎨 PATH A — Canva (matches reference videos exactly)
+Use Canva's Zidan Sasc stick figures — the exact same ones your reference channel uses.
 
 | Cell | What it does |
 |------|-------------|
-| Cell 1 | Install packages (~2 min, once per session) |
-| Cell 2 | Setup directories and voice settings |
+| Cell 1 | Install packages |
+| Cell 2 | Setup |
 | Cell 3 | Mount Google Drive |
-| Cell 4 | Type your episode title and click Set Title |
-| Cell 5 | Upload your script as a .txt file — voiceover is generated automatically |
-| Cell 6 | Fetch icons + render a scene image for every line (~2 sec/scene) |
-| Cell 7 | Generate background music |
-| Cell 8 | Assemble the final video |
-| Cell 9 | Save to Google Drive and download |
+| Cell 4 | Set episode title |
+| Cell 5 | Upload script → generates voiceover automatically |
+| **Cell 6** | **Downloads a ZIP: one audio file per scene + scene_list.txt** |
 
-> No GPU required. CPU runtime works fine — image generation takes only ~2 seconds per scene.
+Then open Canva (free at canva.com):
+- Create a YouTube video design
+- For each scene: add new page → upload `scene_XXXX.mp3` → timing is set automatically
+- Elements → search `zidan sasc` → pick the right stick figure
+- Export MP4 — done!
+
+---
+
+### 🤖 PATH B — Fully automated (no Canva needed)
+Generates everything automatically using flat icons from the Iconify library. No GPU required.
+
+| Cell | What it does |
+|------|-------------|
+| Cell 1–5 | Same as above |
+| Cell 7 | Fetch icons + render scene images (~2 sec/scene) |
+| Cell 8 | Generate background music |
+| Cell 9 | Assemble the final video |
+| Cell 10 | Save to Drive + download |
+
+---
+> **Recommendation:** Use Path A (Canva) for videos that look exactly like your reference. Use Path B for fully automated production with no manual steps.
 """)
 
 CELL_INSTALL = code('''\
@@ -237,8 +254,147 @@ print(f"\\nTotal : {_total:.0f}s  ({_total/60:.1f} min)  |  Scenes: {len(SCENE_D
 print("\\nVoiceover done. Run Cell 6.")
 ''')
 
+CELL_CANVA_EXPORT = code('''\
+# == CELL 6 (PATH A): Canva Export ============================================
+# Run this cell to download everything you need to finish the video in Canva.
+#
+# What you get:
+#   scene_list.txt  — tells you the text + suggested stick figure for every scene
+#   scene_XXXX.mp3  — one audio file per scene (timing is already perfect)
+#
+# In Canva (free at canva.com):
+#   1. Create design → YouTube video (16:9)
+#   2. For Scene 1: add a new page → upload scene_0000.mp3
+#      Canva sets the page duration automatically — timing matches perfectly!
+#   3. Click Elements → search "zidan sasc" → pick a stick figure that fits
+#   4. Repeat for every scene (scene_0001.mp3, scene_0002.mp3, ...)
+#   5. Export as MP4
+# =============================================================================
+import json, os, zipfile, re as _re
+from google.colab import files as _cf
+
+if "WORK_DIR"   not in dir(): WORK_DIR   = "/content/unlearned"
+if "AUDIO_DIR"  not in dir(): AUDIO_DIR  = f"{WORK_DIR}/audio"
+if "EPISODE_TITLE" not in dir():
+    _tp = f"{WORK_DIR}/episode_title.txt"
+    EPISODE_TITLE = open(_tp).read().strip() if os.path.exists(_tp) else "Episode"
+
+if "SCENE_DATA" not in dir():
+    _jpath = f"{WORK_DIR}/scene_data.json"
+    if not os.path.exists(_jpath):
+        raise RuntimeError("scene_data.json not found. Run Cell 5 first.")
+    with open(_jpath) as _f:
+        SCENE_DATA = json.load(_f)
+
+_n     = len(SCENE_DATA)
+_total = sum(s["duration"] for s in SCENE_DATA)
+
+# ── Build scene_list.txt ──────────────────────────────────────────────────────
+_lines = []
+_lines.append(f"EPISODE : {EPISODE_TITLE}")
+_lines.append(f"SCENES  : {_n}   TOTAL: {_total:.0f}s ({_total/60:.1f} min)")
+_lines.append("=" * 65)
+_lines.append("")
+_lines.append("HOW TO USE IN CANVA")
+_lines.append("-" * 30)
+_lines.append("1. canva.com → Create design → YouTube video (16:9)")
+_lines.append("2. For each scene below:")
+_lines.append("     • Add a new page in Canva")
+_lines.append("     • Upload the scene audio file listed (e.g. scene_0001.mp3)")
+_lines.append("     • Canva auto-sets the page duration → timing is perfect!")
+_lines.append("3. Click Elements → search the suggestion below → pick stick figure")
+_lines.append("4. Export MP4 when done")
+_lines.append("")
+_lines.append("=" * 65)
+_lines.append("")
+
+for _sc in SCENE_DATA:
+    _i   = _sc["idx"]
+    _dur = _sc["duration"]
+    _txt = _sc["text"]
+    _aud = os.path.basename(_sc["audio"])
+    _low = _txt.lower()
+
+    # Suggest the most relevant Canva search term per scene content
+    if any(w in _low for w in ["sad","cry","depress","grief","upset","hurt"]):
+        _hint = "zidan sasc sad"
+    elif any(w in _low for w in ["happy","joy","excit","celebrat","laugh","smile"]):
+        _hint = "zidan sasc happy"
+    elif any(w in _low for w in ["angry","anger","rage","frustrat","mad"]):
+        _hint = "zidan sasc angry"
+    elif any(w in _low for w in ["fear","scared","anxious","worry","stress","panic"]):
+        _hint = "zidan sasc fear"
+    elif any(w in _low for w in ["think","thought","brain","mind","idea","memory","imagine"]):
+        _hint = "zidan sasc thinking"
+    elif any(w in _low for w in ["talk","speak","say","tell","listen","voice","conversation"]):
+        _hint = "zidan sasc talking"
+    elif any(w in _low for w in ["friend","together","group","team","social","meet","people"]):
+        _hint = "zidan sasc friends"
+    elif any(w in _low for w in ["alone","lonely","isolat","introvert","quiet","silence"]):
+        _hint = "zidan sasc alone"
+    elif any(w in _low for w in ["work","job","career","boss","office","business","money","success"]):
+        _hint = "zidan sasc work"
+    elif any(w in _low for w in ["learn","study","school","book","read","knowledge","teach"]):
+        _hint = "zidan sasc reading"
+    elif any(w in _low for w in ["walk","run","move","action","step","exercise"]):
+        _hint = "zidan sasc walking"
+    elif any(w in _low for w in ["phone","social media","internet","post","online","screen"]):
+        _hint = "zidan sasc phone"
+    elif any(w in _low for w in ["sleep","rest","tired","exhaust","relax"]):
+        _hint = "zidan sasc sleeping"
+    elif any(w in _low for w in ["confus","lost","question","wonder","unsure","doubt"]):
+        _hint = "zidan sasc confused"
+    elif any(w in _low for w in ["power","strong","control","leader","authority","dominan"]):
+        _hint = "zidan sasc strong"
+    else:
+        # Extract the 2 most meaningful words as a search hint
+        _kws = [w for w in _re.findall(r"[a-zA-Z]{5,}", _txt) if w.lower() not in
+                {"that","this","with","from","they","them","their","have","been","were",
+                 "would","could","should","about","after","before","while","these","those"}]
+        _hint = f"zidan sasc   OR   search: {' '.join(_kws[:2]).lower()}" if _kws else "zidan sasc"
+
+    _lines.append(f"┌─ SCENE {_i+1:03d}  ({_dur:.1f}s)  →  {_aud}")
+    _lines.append(f"│  {_txt}")
+    _lines.append(f"└─ Canva search: {_hint}")
+    _lines.append("")
+
+_txt_path = f"{WORK_DIR}/scene_list.txt"
+with open(_txt_path, "w", encoding="utf-8") as _f:
+    _f.write("\\n".join(_lines))
+
+# ── Build ZIP ─────────────────────────────────────────────────────────────────
+_safe     = _re.sub(r"[^\\w\\s-]+", "", EPISODE_TITLE).strip().replace(" ", "_")
+_zip_path = f"{WORK_DIR}/CANVA_{_safe}.zip"
+
+with zipfile.ZipFile(_zip_path, "w", zipfile.ZIP_DEFLATED) as _zf:
+    _zf.write(_txt_path, "scene_list.txt")
+    for _sc in SCENE_DATA:
+        _ap = _sc["audio"]
+        if os.path.exists(_ap):
+            _zf.write(_ap, os.path.basename(_ap))
+
+_mb = os.path.getsize(_zip_path) / 1_048_576
+print(f"✅  ZIP ready  ({_mb:.1f} MB)")
+print(f"    scene_list.txt  — {_n} scenes with Canva search suggestions")
+print(f"    {_n} x scene_XXXX.mp3 — one audio per scene, timing is perfect")
+print("\\nDownloading now...")
+_cf.download(_zip_path)
+print("""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ NEXT STEPS IN CANVA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 1. canva.com → Create design → YouTube video
+ 2. Scene 1: new page → upload scene_0000.mp3
+    → page duration sets automatically!
+ 3. Elements → search "zidan sasc" → pick figure
+ 4. Repeat for every scene in scene_list.txt
+ 5. Export MP4
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+""")
+''')
+
 CELL_IMAGES = code('''\
-# == CELL 6: Fetch Icons & Render Scene Images =================================
+# == CELL 7 (PATH B): Fetch Icons & Render Scene Images =======================
 # Session-restart safe. Checks cached images first — reruns skip instantly.
 # Uses Iconify API (free, 150 k+ icons, no key) + cairosvg + Pillow.
 # No GPU needed. ~2 seconds per scene.
@@ -485,11 +641,11 @@ else:
                 print(f"  [{_i+1}/{_n}] text-only  |  {_text[:50]}")
             _pil.save(_img_path)
 
-    print(f"\\nAll {_n} images done. Run Cell 7.")
+    print(f"\\nAll {_n} images done. Run Cell 8.")
 ''')
 
 CELL_MUSIC = code('''\
-# == CELL 7: Generate Background Music ========================================
+# == CELL 8 (PATH B): Generate Background Music ================================
 # Generates a 90-second ambient loop then uses FFmpeg to extend it to the full
 # video length — avoids OOM crashes on long videos with hundreds of scenes.
 import numpy as np, wave, os, subprocess
@@ -555,11 +711,11 @@ subprocess.run([
 os.remove(_loop_wav)
 
 print(f"Music: {_music_dur:.0f}s ambient pentatonic drone -> {MUSIC_MP3}")
-print("\\nMusic done. Run Cell 8.")
+print("\\nMusic done. Run Cell 9.")
 ''')
 
 CELL_ASSEMBLE = code('''\
-# == CELL 8: Assemble Final Video =============================================
+# == CELL 9 (PATH B): Assemble Final Video ====================================
 import json, os, re, subprocess
 
 # Restore all constants that Cell 2 would have set — safe after session restart
@@ -663,13 +819,15 @@ if _r.returncode != 0:
 _mb = os.path.getsize(FINAL_VIDEO) / 1_048_576
 print(f"\\nFinal video : {FINAL_VIDEO}")
 print(f"Size        : {_mb:.1f} MB")
-print("\\nAssembly done. Run Cell 9 to download.")
+print("\\nAssembly done. Run Cell 10 to download.")
 ''')
 
 CELL_DOWNLOAD = code('''\
-# == CELL 9: Save to Drive & Download =========================================
+# == CELL 10 (PATH B): Save to Drive & Download ================================
 import shutil, os, re
 from google.colab import files as _cf
+
+if "WORK_DIR" not in dir(): WORK_DIR = "/content/unlearned"
 
 if "FINAL_VIDEO" not in dir():
     import json
@@ -679,7 +837,7 @@ if "FINAL_VIDEO" not in dir():
     FINAL_VIDEO = f\'{WORK_DIR}/UNLEARNED_{_safe}.mp4\'
 
 if not os.path.exists(FINAL_VIDEO):
-    raise RuntimeError(f"Video not found: {FINAL_VIDEO}\\nRun Cell 8 first.")
+    raise RuntimeError(f"Video not found: {FINAL_VIDEO}\\nRun Cell 9 first.")
 
 try:
     _safe = re.sub(r\'[^\\w\\s-]+\', \'\', EPISODE_TITLE).strip().replace(\' \', \'_\')
@@ -704,8 +862,11 @@ if "SCENE_DATA" in dir():
 
 CELLS = [
     CELL_TITLE, CELL_INSTALL, CELL_SETUP, CELL_DRIVE,
-    CELL_TITLE_INPUT, CELL_UPLOAD_VOICE, CELL_IMAGES,
-    CELL_MUSIC, CELL_ASSEMBLE, CELL_DOWNLOAD,
+    CELL_TITLE_INPUT, CELL_UPLOAD_VOICE,
+    # ── PATH A: Canva export (recommended — matches reference videos exactly)
+    CELL_CANVA_EXPORT,
+    # ── PATH B: Fully automated (no Canva needed)
+    CELL_IMAGES, CELL_MUSIC, CELL_ASSEMBLE, CELL_DOWNLOAD,
 ]
 
 NOTEBOOK = {
