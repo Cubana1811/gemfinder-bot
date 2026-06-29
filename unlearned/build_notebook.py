@@ -139,7 +139,7 @@ pipe = StableDiffusionXLPipeline.from_pretrained(
     torch_dtype=torch.float16,
     variant="fp16",
     use_safetensors=True,
-).to("cuda")
+)
 pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
 pipe.enable_model_cpu_offload()
 
@@ -237,6 +237,8 @@ def get_duration(path):
     r = subprocess.run(
         [\'ffprobe\', \'-v\', \'quiet\', \'-print_format\', \'json\', \'-show_format\', path],
         capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        raise RuntimeError(f"ffprobe failed on {path}: {r.stderr[:200]}")
     return float(json.loads(r.stdout)[\'format\'][\'duration\'])
 
 async def _tts(text, path):
@@ -264,10 +266,18 @@ print(f"  {len(_raw_scenes)} scenes")
 
 print("\\nGenerating voiceover (edge-tts)...")
 SCENE_DATA = []
+import time as _time
 _loop = asyncio.get_event_loop()
 for _i, _text in enumerate(_raw_scenes):
     _audio = f\'{AUDIO_DIR}/scene_{_i:04d}.mp3\'
-    _loop.run_until_complete(_tts(_text, _audio))
+    for _try in range(3):
+        try:
+            _loop.run_until_complete(_tts(_text, _audio))
+            break
+        except Exception as _e:
+            if _try == 2:
+                raise RuntimeError(f"TTS failed for scene {_i+1} after 3 tries: {_e}")
+            _time.sleep(2)
     _dur = get_duration(_audio)
     SCENE_DATA.append({
         \'idx\':     _i,
@@ -289,63 +299,98 @@ print("\\nVoiceover done. Run Cell 6.")
 
 CELL_IMAGES = code('''\
 # == CELL 6: Generate SDXL Stick Figure Images ================================
-import json, os, torch
+# Fully session-restart safe. If Colab disconnected after this cell ran
+# previously, re-running it detects all cached images and skips straight
+# to "Run Cell 7" — nothing is regenerated, no model needed.
+import json as _json, os, re, torch
+
+# Hardcode paths so this cell never depends on Cell 2 being in scope
+_WDIR = "/content/unlearned"
+_IDIR = f"{_WDIR}/images"
+_JPATH = f"{_WDIR}/scene_data.json"
 
 if "SCENE_DATA" not in dir():
-    import json as _json
-    with open(f\'{WORK_DIR}/scene_data.json\') as _f:
+    if not os.path.exists(_JPATH):
+        raise RuntimeError("scene_data.json not found. Run Cell 5 first.")
+    with open(_JPATH) as _f:
         SCENE_DATA = _json.load(_f)
 
 _n = len(SCENE_DATA)
 _missing = [_sc for _sc in SCENE_DATA if not os.path.exists(_sc[\'image\'])]
 
+# Re-define prompt helpers if Cell 2 was not run this session
+if _missing and "build_prompt" not in dir():
+    _STOPS = set((
+        "a an the in on at is was are were it its of to and or but for with by "
+        "from this that they them their we our you your he she his her not no as "
+        "so be been has have had do does did will would could should may might also "
+        "just than then when where who which what how why if all one two three "
+        "first last into out up about more most some any each every can there here "
+        "now after before during while because since though although like even get "
+        "got very much many such way make made use used using take took time "
+        "know knew think thought say said see saw come came go went back new old "
+        "other another both own long well still only over day year life same "
+        "become became through between again those these"
+    ).split())
+    def extract_keywords(text, n=7):
+        words = re.findall(r\'\\b[a-zA-Z]{3,}\\b\', text.lower())
+        kw = [w for w in words if w not in _STOPS]
+        kw.sort(key=len, reverse=True)
+        return ", ".join(list(dict.fromkeys(kw))[:n])
+    NEG_PROMPT = (
+        "realistic, photographic, 3d render, complex, colorful, painting, "
+        "detailed, text, watermark, blurry, photograph, logo, signature, "
+        "color fill, gradient, shadow, realistic people, anime, cartoon, "
+        "photo, human face, portrait, background detail"
+    )
+    def build_prompt(text):
+        kw = extract_keywords(text)
+        return (
+            f"stick figure drawing of {kw}, "
+            "simple black ink lines on white paper, "
+            "minimalist hand-drawn sketch, clean line art, "
+            "educational illustration, no fill, no color, "
+            "stick man figures, crude simple drawing"
+        )
+
+# Load SDXL only when images are actually missing and pipe not already loaded
 if _missing and "pipe" not in dir():
-    print(f"  {len(_missing)} images still need generating — loading SDXL model first.")
-    print("  (If you already ran Cell 2 this session, ignore this message.)\\n")
+    print(f"{len(_missing)} images to generate — loading SDXL (session restore)...")
     from diffusers import StableDiffusionXLPipeline, DPMSolverMultistepScheduler
     pipe = StableDiffusionXLPipeline.from_pretrained(
         "stabilityai/stable-diffusion-xl-base-1.0",
         torch_dtype=torch.float16, variant="fp16", use_safetensors=True,
-    ).to("cuda")
+    )
     pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
     pipe.enable_model_cpu_offload()
     try:
         pipe.enable_xformers_memory_efficient_attention()
     except Exception:
         pass
-    print("  SDXL loaded.\\n")
+    print("SDXL ready.\\n")
 
 if not _missing:
-    print(f"All {_n} images already generated — nothing to do. Run Cell 7.")
+    print(f"All {_n} images already on disk. Run Cell 7.")
 else:
-    _est = max(1, round(len(_missing) * 25 / 60))
-    print(f"Generating {len(_missing)}/{_n} stick figure images with SDXL...")
-    print(f"Estimated time: ~{_est} min on T4 GPU\\n")
-
+    print(f"Generating {len(_missing)}/{_n} images (~{max(1,round(len(_missing)*25/60))} min)...\\n")
     for _i, _sc in enumerate(SCENE_DATA):
         _img_path = _sc[\'image\']
-
         if os.path.exists(_img_path):
             print(f"  [{_i+1}/{_n}] cached  {os.path.basename(_img_path)}")
             continue
-
         _prompt = build_prompt(_sc[\'text\'])
         print(f"  [{_i+1}/{_n}] {_sc[\'duration\']:.1f}s  {_sc[\'text\'][:50]}...")
         print(f"    -> {_prompt[:80]}")
-
         with torch.inference_mode():
             _image = pipe(
                 prompt=_prompt,
                 negative_prompt=NEG_PROMPT,
-                width=1280,
-                height=720,
+                width=1280, height=720,
                 num_inference_steps=20,
                 guidance_scale=7.5,
             ).images[0]
-
         _image.save(_img_path)
         print(f"    saved: {os.path.basename(_img_path)}")
-
     print(f"\\nAll {_n} images done. Run Cell 7.")
 ''')
 
@@ -355,9 +400,15 @@ CELL_MUSIC = code('''\
 # video length — avoids OOM crashes on long videos with hundreds of scenes.
 import numpy as np, wave, os, subprocess
 
+if "WORK_DIR" not in dir():
+    WORK_DIR = "/content/unlearned"
+
 if "SCENE_DATA" not in dir():
     import json
-    with open(f\'{WORK_DIR}/scene_data.json\') as _f:
+    _jpath = f"{WORK_DIR}/scene_data.json"
+    if not os.path.exists(_jpath):
+        raise RuntimeError("scene_data.json not found. Run Cell 5 first.")
+    with open(_jpath) as _f:
         SCENE_DATA = json.load(_f)
 
 _total_dur = sum(s["duration"] for s in SCENE_DATA)
@@ -417,14 +468,24 @@ CELL_ASSEMBLE = code('''\
 # == CELL 8: Assemble Final Video =============================================
 import json, os, re, subprocess
 
+# Restore all constants that Cell 2 would have set — safe after session restart
+if "WORK_DIR"  not in dir(): WORK_DIR  = "/content/unlearned"
+if "CLIP_DIR"  not in dir(): CLIP_DIR  = f"{WORK_DIR}/clips"
+if "AUDIO_DIR" not in dir(): AUDIO_DIR = f"{WORK_DIR}/audio"
+if "MUSIC_VOL" not in dir(): MUSIC_VOL = 0.08
+if "VOICE"     not in dir(): VOICE     = "en-US-AndrewNeural"
+
 if "SCENE_DATA" not in dir():
-    with open(f\'{WORK_DIR}/scene_data.json\') as _f:
+    _jpath = f"{WORK_DIR}/scene_data.json"
+    if not os.path.exists(_jpath):
+        raise RuntimeError("scene_data.json not found. Run Cell 5 first.")
+    with open(_jpath) as _f:
         SCENE_DATA = json.load(_f)
 if "EPISODE_TITLE" not in dir():
-    with open(f\'{WORK_DIR}/episode_title.txt\') as _f:
-        EPISODE_TITLE = _f.read().strip()
+    _tp = f"{WORK_DIR}/episode_title.txt"
+    EPISODE_TITLE = open(_tp).read().strip() if os.path.exists(_tp) else "Episode"
 if "MUSIC_MP3" not in dir():
-    MUSIC_MP3 = f\'{WORK_DIR}/ambient_music.mp3\'
+    MUSIC_MP3 = f"{WORK_DIR}/ambient_music.mp3"
 
 _n = len(SCENE_DATA)
 print(f"Building {_n} Ken Burns clips (each clip = exact audio duration)...")

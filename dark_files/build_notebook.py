@@ -349,6 +349,8 @@ def audio_dur(path):
         ['ffprobe','-v','quiet','-print_format','json','-show_format', path],
         capture_output=True, text=True
     )
+    if r.returncode != 0 or not r.stdout.strip():
+        raise RuntimeError(f"ffprobe failed on {path}: {r.stderr[:200]}")
     return float(json.loads(r.stdout)['format']['duration'])
 
 print(f"🎙️   Generating voiceover  ({VOICE})...\\n")
@@ -357,7 +359,14 @@ audio_paths, vtt_paths, durations = [], [], []
 for i, scene in enumerate(scenes):
     ap = f'/content/dark_files/audio/scene_{i:03d}.mp3'
     vp = f'/content/dark_files/audio/scene_{i:03d}.vtt'
-    asyncio.run(gen_voice_simple(scene, VOICE, SPEAKING_RATE, SPEAKING_PITCH, ap))
+    for _try in range(3):
+        try:
+            asyncio.run(gen_voice_simple(scene, VOICE, SPEAKING_RATE, SPEAKING_PITCH, ap))
+            break
+        except Exception as _e:
+            if _try == 2:
+                raise RuntimeError(f"TTS failed for scene {i+1} after 3 tries: {_e}")
+            time.sleep(2)
     d = audio_dur(ap)
     with open(vp, 'w') as f:
         f.write(f"WEBVTT\\n\\n00:00.000 --> {int(d//60):02d}:{d%60:06.3f}\\n{scene}\\n\\n")
@@ -365,6 +374,13 @@ for i, scene in enumerate(scenes):
     print(f"  ✅  Scene {i+1}/{len(scenes)}: {d:.2f}s  |  {scene[:55]}...")
 
 total_duration = sum(durations)
+
+# Save to disk so later cells can recover on session restart
+_jpath = '/content/dark_files/scene_data.json'
+with open(_jpath, 'w') as _jf:
+    json.dump([{'text': s, 'audio': a, 'vtt': v, 'duration': d}
+               for s, a, v, d in zip(scenes, audio_paths, vtt_paths, durations)], _jf, indent=2)
+
 print(f"\\n✅  Voiceover complete!")
 print(f"⏱️   Total duration: {total_duration:.1f}s  ({total_duration/60:.1f} min)")
 """)
@@ -411,8 +427,24 @@ CELL_GEN_CLIPS = code("""\
 #
 #  Fallback: if SVD errors on a clip, Ken Burns zoom is used for that clip only.
 # ─────────────────────────────────────────────────────────────────────────────
-import time, shutil
+import time, shutil, glob as _glob_mod
 from PIL import Image
+
+# ── Session restart recovery — reload scene data if cells above weren't run ───
+if 'scenes' not in dir() or 'durations' not in dir() or 'audio_paths' not in dir():
+    _jpath = '/content/dark_files/scene_data.json'
+    if not os.path.exists(_jpath):
+        raise RuntimeError("scene_data.json not found. Run Cell 9 (Voiceover) first.")
+    with open(_jpath) as _jf:
+        _sd = json.load(_jf)
+    scenes      = [x['text']     for x in _sd]
+    audio_paths = [x['audio']    for x in _sd]
+    vtt_paths   = [x['vtt']      for x in _sd]
+    durations   = [x['duration'] for x in _sd]
+    total_duration = sum(durations)
+    print(f"Recovered {len(scenes)} scenes from disk.")
+
+if 'EPISODE_TITLE' not in dir(): EPISODE_TITLE = 'The Classified Files'
 
 # ── Mount Drive for checkpointing ─────────────────────────────────────────────
 try:
@@ -501,7 +533,7 @@ def _ken_burns(img_path, audio_path, out_path, duration, idx=0):
 def _svd_clip(img_path, audio_path, out_path, scene_idx=0):
     SVD_FPS, SVD_FRAMES = 8, 14
     pil = Image.open(img_path).convert("RGB").resize((1024, 576))
-    gen = torch.manual_seed(scene_idx * 31 + 7)
+    gen = torch.Generator(device='cuda').manual_seed(scene_idx * 31 + 7)
     frames = svd_pipe(
         pil,
         num_frames=SVD_FRAMES,
@@ -576,12 +608,31 @@ print(f"  SVD: {_svd_ok}   Ken Burns: {_kb_n}   Resumed: {_resumed}/{len(scenes)
 
 CELL_MUSIC = code("""\
 # ── STEP 8: Generate dark ambient background music ───────────────
+import glob as _glob_mod, json as _json_mod, subprocess as _sp_mod
 from transformers import pipeline as hf_pipeline
-import wave, numpy as np
+import wave, numpy as np, torch
 
-# Free GPU memory from image model first
-del pipe
+# Free GPU memory from prior models (already done if Cell 7 ran in this session)
+if 'pipe'     in dir(): del pipe
+if 'svd_pipe' in dir(): del svd_pipe
 torch.cuda.empty_cache()
+
+# Session restart recovery
+if 'DEVICE' not in dir():
+    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+if 'total_duration' not in dir():
+    _afiles = sorted(_glob_mod.glob('/content/dark_files/audio/scene_???.mp3'))
+    if not _afiles:
+        raise RuntimeError("No audio files found. Run Cell 9 (Voiceover) first.")
+    def _ap_dur(_a):
+        _r = _sp_mod.run(['ffprobe','-v','quiet','-print_format','json','-show_format', _a],
+                         capture_output=True, text=True)
+        if _r.returncode != 0 or not _r.stdout.strip():
+            raise RuntimeError(f"ffprobe failed on {_a}: {_r.stderr[:200]}")
+        return float(_json_mod.loads(_r.stdout)['format']['duration'])
+    total_duration = sum(_ap_dur(_a) for _a in _afiles)
+    print(f"Recovered total_duration = {total_duration:.1f}s from {len(_afiles)} audio files")
 
 print("Loading MusicGen-small ...")
 music_pipe = hf_pipeline(
@@ -634,6 +685,29 @@ CELL_ASSEMBLE = code("""\
 # ── STEP 9: Assemble clips with fade transitions ─────────────────
 #  Each clip already carries its own voiceover audio (embedded in Step 7).
 #  We apply fades, concatenate, then feed into color grade.
+import glob as _glob_mod, json as _json_mod, subprocess, os
+
+# Session restart recovery
+if 'clip_paths' not in dir():
+    clip_paths = sorted(_glob_mod.glob('/content/dark_files/clips/clip_???.mp4'))
+    if not clip_paths:
+        raise RuntimeError("No clip files found. Run Cell 7 (Generate clips) first.")
+    print(f"Recovered {len(clip_paths)} clip paths from disk.")
+
+if 'durations' not in dir():
+    _afiles = sorted(_glob_mod.glob('/content/dark_files/audio/scene_???.mp3'))
+    if not _afiles:
+        raise RuntimeError("No audio files found. Run Cell 9 (Voiceover) first.")
+    def _ap_dur9(_a):
+        _r = subprocess.run(['ffprobe','-v','quiet','-print_format','json','-show_format', _a],
+                            capture_output=True, text=True)
+        if _r.returncode != 0 or not _r.stdout.strip():
+            raise RuntimeError(f"ffprobe failed on {_a}: {_r.stderr[:200]}")
+        return float(_json_mod.loads(_r.stdout)['format']['duration'])
+    durations = [_ap_dur9(_a) for _a in _afiles]
+    print(f"Recovered {len(durations)} durations from audio files.")
+
+_n_clips = len(clip_paths)
 
 def add_fades(src, dst, dur, fade_dur=0.4):
     fade_out_start = max(0, dur - fade_dur)
@@ -652,7 +726,7 @@ for i, (cp, dur) in enumerate(zip(clip_paths, durations)):
     fp = f'/content/dark_files/clips/clip_{i:03d}_faded.mp4'
     add_fades(cp, fp, dur)
     faded_paths.append(fp)
-    print(f"  Clip {i+1}/{len(scenes)} faded")
+    print(f"  Clip {i+1}/{_n_clips} faded")
 
 # Concatenate all faded clips — audio (voiceover) is already embedded per clip
 concat_list = '/content/dark_files/concat.txt'
@@ -672,6 +746,12 @@ print("\\nAll clips assembled — voiceover perfectly synced to each scene.")
 
 CELL_GRADE = code("""\
 # ── STEP 10: Apply Dark Files cinematic color grade ──────────────
+import os, subprocess
+
+if 'video_with_voice' not in dir():
+    video_with_voice = '/content/dark_files/final/video_raw.mp4'
+if not os.path.exists(video_with_voice):
+    raise RuntimeError(f"Assembly output not found: {video_with_voice}  Run Cell 9 (Assemble) first.")
 
 print("🎨  Applying Dark Files color grade ...")
 print("    → Cold blue channel shift")
@@ -707,6 +787,29 @@ print("\\n✅  Dark Files color grade applied!")
 
 CELL_CAPTIONS = code("""\
 # ── STEP 11: Build + burn synced captions ───────────────────────
+import glob as _glob_mod, json as _json_mod, subprocess, os, re
+
+if 'video_graded' not in dir():
+    video_graded = '/content/dark_files/final/video_graded.mp4'
+if not os.path.exists(video_graded):
+    raise RuntimeError(f"Graded video not found: {video_graded}  Run Cell 10 (Color grade) first.")
+
+if 'vtt_paths' not in dir():
+    vtt_paths = sorted(_glob_mod.glob('/content/dark_files/audio/scene_???.vtt'))
+    if not vtt_paths:
+        raise RuntimeError("No VTT files found. Run Cell 9 (Voiceover) first.")
+    print(f"Recovered {len(vtt_paths)} VTT paths from disk.")
+
+if 'durations' not in dir():
+    _afiles = sorted(_glob_mod.glob('/content/dark_files/audio/scene_???.mp3'))
+    def _ap_dur11(_a):
+        _r = subprocess.run(['ffprobe','-v','quiet','-print_format','json','-show_format', _a],
+                            capture_output=True, text=True)
+        if _r.returncode != 0 or not _r.stdout.strip():
+            raise RuntimeError(f"ffprobe failed on {_a}: {_r.stderr[:200]}")
+        return float(_json_mod.loads(_r.stdout)['format']['duration'])
+    durations = [_ap_dur11(_a) for _a in _afiles]
+    print(f"Recovered {len(durations)} durations from disk.")
 
 def vtt_time_to_ms(t):
     t = t.strip().replace(',','.')
@@ -783,6 +886,21 @@ print("✅  Captions burned in!")
 
 CELL_MIX = code("""\
 # ── STEP 12: Final audio mix (voice 100% + music 15%) ───────────
+import glob as _glob_mod, os, re, json, subprocess
+
+if 'EPISODE_TITLE' not in dir(): EPISODE_TITLE = 'The Classified Files'
+if 'VOICE'         not in dir(): VOICE         = 'en-US-GuyNeural'
+if 'entries'       not in dir(): entries       = []
+
+if 'video_captioned' not in dir():
+    video_captioned = '/content/dark_files/final/video_captioned.mp4'
+if not os.path.exists(video_captioned):
+    raise RuntimeError(f"Captioned video not found: {video_captioned}  Run Cell 11 first.")
+
+if 'music_wav' not in dir():
+    music_wav = '/content/dark_files/audio/music_final.wav'
+if not os.path.exists(music_wav):
+    raise RuntimeError(f"Music not found: {music_wav}  Run Cell 8 (Music) first.")
 
 print("🎵  Mixing voiceover + background music ...")
 
@@ -807,6 +925,8 @@ r = subprocess.run(
     ['ffprobe','-v','quiet','-print_format','json','-show_format','-show_streams', final_video],
     capture_output=True, text=True
 )
+if r.returncode != 0 or not r.stdout.strip():
+    raise RuntimeError(f"ffprobe failed on final video: {r.stderr[:200]}")
 info = json.loads(r.stdout)
 size_mb  = int(info['format']['size']) / (1024*1024)
 vid_dur  = float(info['format']['duration'])
@@ -831,9 +951,18 @@ print(f"{'='*55}")
 CELL_DOWNLOAD = code("""\
 # ── STEP 13: Save to Google Drive + download ─────────────────────
 
-import os, shutil
+import glob as _glob_mod, os, re, shutil
 from IPython.display import Video, display
 from google.colab import files as colab_files
+
+if 'EPISODE_TITLE' not in dir(): EPISODE_TITLE = 'The Classified Files'
+
+if 'final_video' not in dir():
+    _candidates = sorted(_glob_mod.glob('/content/dark_files/final/DARK_FILES_*.mp4'))
+    if not _candidates:
+        raise RuntimeError("Final video not found. Run Cell 12 (Audio mix) first.")
+    final_video = _candidates[-1]
+    print(f"Recovered final video: {final_video}")
 
 # ── Mount Google Drive and save a permanent copy ─────────────────
 try:
