@@ -98,7 +98,7 @@ print("🚀  Ready to generate Dark Files videos!")
 
 CELL_INSTALL = code("""\
 # ── STEP 1: Install dependencies ────────────────────────────────
-print("📦  Installing packages (3–5 min first time)...")
+print("Installing packages (3-5 min first time)...")
 
 import subprocess
 pkgs = [
@@ -106,21 +106,15 @@ pkgs = [
     "diffusers>=0.31.0",
     "transformers>=4.40.0",
     "accelerate",
-    "imageio[ffmpeg]",
-    "moviepy",
-    "scipy",
     "sentencepiece",
     "protobuf",
 ]
-subprocess.run(
-    ["pip", "install", "-q", "--upgrade"] + pkgs,
-    check=True
-)
+subprocess.run(["pip", "install", "-q", "--upgrade"] + pkgs, check=True)
 
 # Verify FFmpeg
 r = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
-print(f"✅  {r.stdout.splitlines()[0]}" if r.returncode == 0 else "❌  FFmpeg missing")
-print("✅  All packages installed!")
+print(f"  {r.stdout.splitlines()[0]}" if r.returncode == 0 else "  FFmpeg missing!")
+print("All packages installed!")
 """)
 
 CELL_IMPORTS = code("""\
@@ -289,6 +283,21 @@ def parse_scenes(script, max_words=55):
                 scenes.append(' '.join(bucket))
     return [s for s in scenes if s.strip()]
 
+_KW_STOPS = {
+    "that","this","with","from","they","them","their","have","been","were",
+    "would","could","should","about","after","before","while","these","those",
+    "some","when","then","what","which","will","also","just","like","more",
+    "than","into","only","over","such","each","most","made","make","take",
+    "time","very","even","back","still","well","said","told","went","came",
+    "know","seen","year","years","never","every","there","here","where","only",
+    "because","since","until","first","last","found","called","became","began",
+}
+
+def _scene_keywords(text, n=5):
+    words = re.findall(r'\\b[a-zA-Z]{4,}\\b', text.lower())
+    kw = [w for w in words if w not in _KW_STOPS]
+    return ", ".join(list(dict.fromkeys(kw))[:n]) or "mystery"
+
 def make_prompt(scene_text):
     low = scene_text.lower()
     matched = []
@@ -296,9 +305,15 @@ def make_prompt(scene_text):
         if re.search(pattern, low, re.IGNORECASE):
             matched.append(visual)
     if matched:
-        base = ', '.join(matched[:2])
+        base = ", ".join(matched[:2])
     else:
-        base = 'dark mysterious empty environment, dramatic single light source, heavy shadows, fog'
+        # Extract keywords from the scene so every prompt is contextually specific
+        kw = _scene_keywords(scene_text)
+        base = (
+            f"cinematic documentary scene depicting {kw}, "
+            "dramatic atmospheric lighting, dark mysterious environment, "
+            "shadows and depth, professional cinematography"
+        )
     return f"{base}, {DARK_AESTHETIC}", DARK_NEGATIVE
 
 def estimate_secs(text, wpm=110):
@@ -381,74 +396,170 @@ print(f"    VRAM used: {torch.cuda.memory_allocated()/1e9:.2f} GB / 16 GB")
 """)
 
 CELL_GEN_CLIPS = code("""\
-# ── STEP 7: Generate cinematic images + Ken Burns clips (audio-synced) ───────
+# ── STEP 7: Generate images → real animated video clips (audio-synced) ───────
 #
-#  SDXL generates one dark cinematic image per scene.
-#  Each clip embeds its own voiceover audio via -shortest so the video
-#  is mathematically exactly as long as the audio — no drift, no lag.
+#  Phase 1 — SDXL generates one cinematic still image per scene.
+#  Phase 2 — Stable Video Diffusion (SVD img2vid-xt) animates each image
+#             into genuine motion footage (25 frames at 7 fps ≈ 3.6 s).
+#             FFmpeg loops the raw SVD clip to the exact voiceover length and
+#             embeds the audio via -shortest — frame-perfect sync, no drift.
+#
+#  Fallback: if SVD fails for a clip, Ken Burns zoom is used instead so the
+#            pipeline never stalls mid-render.
 # ─────────────────────────────────────────────────────────────────────────────
 import time
+from PIL import Image
 
+# ── Phase 1: generate all SDXL images first, then swap models ────────────────
+print(f"Phase 1 — SDXL images ({len(scenes)} scenes)\\n{'='*65}")
+img_paths = []
+t0 = time.time()
+
+for i, scene in enumerate(scenes):
+    img_path = f'/content/dark_files/clips/scene_{i:03d}.png'
+    img_paths.append(img_path)
+
+    if os.path.exists(img_path):
+        print(f"  Scene {i+1}/{len(scenes)}  cached")
+        continue
+
+    prompt, neg = make_prompt(scene)
+    gen = torch.Generator(device='cuda').manual_seed(i * 17 + 42)
+    img = pipe(
+        prompt=prompt, negative_prompt=neg,
+        width=1024, height=576,
+        num_inference_steps=25, guidance_scale=7.5,
+        generator=gen,
+    ).images[0]
+    img.save(img_path)
+    print(f"  Scene {i+1}/{len(scenes)}  {time.time()-t0:.0f}s  {prompt[:70]}...")
+
+print(f"\\nAll images done ({(time.time()-t0)/60:.1f} min). Swapping to SVD model...")
+
+# Free SDXL from VRAM before loading SVD
+del pipe
+torch.cuda.empty_cache()
+
+# ── Phase 2: load Stable Video Diffusion ──────────────────────────────────────
+from diffusers import StableVideoDiffusionPipeline
+
+print("Loading stabilityai/stable-video-diffusion-img2vid-xt ...")
+svd_pipe = StableVideoDiffusionPipeline.from_pretrained(
+    "stabilityai/stable-video-diffusion-img2vid-xt",
+    torch_dtype=torch.float16,
+    variant="fp16",
+    cache_dir='/content/dark_files/cache',
+)
+svd_pipe.enable_model_cpu_offload()
+print(f"SVD loaded  |  VRAM: {torch.cuda.memory_allocated()/1e9:.2f} GB / 16 GB")
+
+# ── Ken Burns fallback (used if SVD fails for a clip) ─────────────────────────
 KEN_BURNS = [
     "zoompan=z='min(zoom+0.0015,1.5)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
     "zoompan=z='min(zoom+0.0012,1.4)':x='min(iw-iw/zoom,iw/2-(iw/zoom/2)+in*0.4)':y='ih/2-(ih/zoom/2)'",
     "zoompan=z='min(zoom+0.0012,1.4)':x='iw/2-(iw/zoom/2)':y='max(0,ih/2-(ih/zoom/2)-in*0.3)'",
     "zoompan=z='max(1.0,1.5-in*0.0018)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
-    "zoompan=z='1.35':x='min(iw-iw/zoom,in*0.6)':y='ih/2-(ih/zoom/2)'",
 ]
 
-def gen_image(prompt, neg, img_path, seed=0):
-    gen = torch.Generator(device='cuda').manual_seed(seed)
-    img = pipe(
-        prompt=prompt,
-        negative_prompt=neg,
-        width=1024, height=576,
-        num_inference_steps=25,
-        guidance_scale=7.5,
-        generator=gen,
-    ).images[0]
-    img.save(img_path)
-
-def image_to_clip(img_path, audio_path, out_path, duration, effect_idx=0):
+def ken_burns_clip(img_path, audio_path, out_path, duration, effect_idx=0):
     fps    = 25
     frames = max(int(duration * fps) + 1, 2)
     effect = KEN_BURNS[effect_idx % len(KEN_BURNS)]
-    # Embed voiceover audio in the clip. -shortest cuts video to exact audio length.
     subprocess.run([
-        'ffmpeg', '-y',
-        '-loop', '1', '-i', img_path,
-        '-i', audio_path,
+        'ffmpeg', '-y', '-loop', '1', '-i', img_path, '-i', audio_path,
         '-filter_complex', f'[0:v]{effect}:d={frames}:s=1024x576,fps={fps}[v]',
         '-map', '[v]', '-map', '1:a',
         '-c:v', 'libx264', '-crf', '18', '-preset', 'fast',
-        '-c:a', 'aac', '-b:a', '192k',
-        '-pix_fmt', 'yuv420p', '-shortest',
-        out_path
+        '-c:a', 'aac', '-b:a', '192k', '-pix_fmt', 'yuv420p', '-shortest',
+        out_path,
     ], capture_output=True, check=True)
 
-print(f"Generating {len(scenes)} cinematic clips ...\\n{'='*65}")
+def svd_clip(img_path, audio_path, out_path, duration, scene_idx=0):
+    \"\"\"Animate img_path with SVD, then loop+trim to exact audio duration.\"\"\"
+    SVD_FPS    = 7
+    SVD_FRAMES = 25   # img2vid-xt native output
+
+    # Load and resize image to SVD's required 1024×576
+    pil_img = Image.open(img_path).convert("RGB").resize((1024, 576))
+
+    generator = torch.manual_seed(scene_idx * 31 + 7)
+    frames = svd_pipe(
+        pil_img,
+        num_frames=SVD_FRAMES,
+        num_inference_steps=25,
+        decode_chunk_size=8,
+        motion_bucket_id=127,
+        noise_aug_strength=0.02,
+        generator=generator,
+    ).frames[0]   # list of PIL Images, length SVD_FRAMES
+
+    # Save SVD frames as individual PNGs, encode to a raw ~3.6 s clip
+    frames_dir = f'/content/dark_files/clips/svd_frames_{scene_idx:03d}'
+    os.makedirs(frames_dir, exist_ok=True)
+    for fi, frame in enumerate(frames):
+        frame.save(f'{frames_dir}/f{fi:04d}.png')
+
+    raw_svd = f'/content/dark_files/clips/svd_raw_{scene_idx:03d}.mp4'
+    subprocess.run([
+        'ffmpeg', '-y',
+        '-framerate', str(SVD_FPS),
+        '-i', f'{frames_dir}/f%04d.png',
+        '-c:v', 'libx264', '-crf', '18', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+        raw_svd,
+    ], capture_output=True, check=True)
+
+    # Loop SVD clip to cover audio length, then embed audio with -shortest
+    subprocess.run([
+        'ffmpeg', '-y',
+        '-stream_loop', '-1', '-i', raw_svd,
+        '-i', audio_path,
+        '-map', '0:v', '-map', '1:a',
+        '-c:v', 'libx264', '-crf', '18', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac', '-b:a', '192k',
+        '-shortest',
+        out_path,
+    ], capture_output=True, check=True)
+
+    # Clean up temp frames dir
+    import shutil
+    shutil.rmtree(frames_dir, ignore_errors=True)
+    os.remove(raw_svd)
+
+# ── Phase 2 loop: animate every scene image ────────────────────────────────────
+print(f"\\nPhase 2 — SVD video generation ({len(scenes)} scenes)\\n{'='*65}")
 clip_paths = []
+svd_ok, kb_fallback = 0, 0
 t0 = time.time()
 
 for i, (scene, dur, ap) in enumerate(zip(scenes, durations, audio_paths)):
-    img_path = f'/content/dark_files/clips/scene_{i:03d}.png'
+    img_path = img_paths[i]
     out_path = f'/content/dark_files/clips/clip_{i:03d}.mp4'
-    prompt, neg = make_prompt(scene)
-
-    print(f"\\nScene {i+1}/{len(scenes)} ({dur:.1f}s)")
-    print(f"    {prompt[:85]}...")
-
-    t1 = time.time()
-    gen_image(prompt, neg, img_path, seed=i * 17 + 42)
-    image_to_clip(img_path, ap, out_path, dur, effect_idx=i)
     clip_paths.append(out_path)
+
+    print(f"\\nScene {i+1}/{len(scenes)}  ({dur:.1f}s)  {scene[:55]}...")
+    t1 = time.time()
+
+    try:
+        svd_clip(img_path, ap, out_path, dur, scene_idx=i)
+        svd_ok += 1
+        mode = "SVD"
+    except Exception as _e:
+        print(f"  SVD failed ({_e!r:.60}) — using Ken Burns fallback")
+        ken_burns_clip(img_path, ap, out_path, dur, effect_idx=i)
+        kb_fallback += 1
+        mode = "KB"
 
     elapsed = time.time() - t1
     done    = i + 1
     eta     = (time.time() - t0) / done * (len(scenes) - done)
-    print(f"    Done: {elapsed:.0f}s  |  ETA: ~{eta/60:.0f} min remaining")
+    print(f"  [{mode}] {elapsed:.0f}s  |  ETA: ~{eta/60:.0f} min")
 
-print(f"\\nAll clips done! Total: {(time.time()-t0)/60:.1f} min")
+del svd_pipe
+torch.cuda.empty_cache()
+
+print(f"\\nAll clips done  ({(time.time()-t0)/60:.1f} min total)")
+print(f"  SVD animated : {svd_ok}/{len(scenes)}")
+print(f"  Ken Burns    : {kb_fallback}/{len(scenes)}")
 """)
 
 CELL_MUSIC = code("""\

@@ -331,6 +331,8 @@ print(f"\\nAll {_n} images done. Run Cell 7.")
 
 CELL_MUSIC = code('''\
 # == CELL 7: Generate Background Music ========================================
+# Generates a 90-second ambient loop then uses FFmpeg to extend it to the full
+# video length — avoids OOM crashes on long videos with hundreds of scenes.
 import numpy as np, wave, os, subprocess
 
 if "SCENE_DATA" not in dir():
@@ -339,42 +341,53 @@ if "SCENE_DATA" not in dir():
         SCENE_DATA = json.load(_f)
 
 _total_dur = sum(s["duration"] for s in SCENE_DATA)
-_music_dur = _total_dur + 10.0
+_music_dur = _total_dur + 8.0
 
+# Generate a 90-second base loop only — tiny RAM footprint regardless of
+# video length. FFmpeg will loop it to the full duration below.
+_LOOP_DUR = 90.0
 SR = 44100
-t  = np.linspace(0, _music_dur, int(SR * _music_dur), endpoint=False)
+t  = np.linspace(0, _LOOP_DUR, int(SR * _LOOP_DUR), endpoint=False)
 
 _NOTES = [130.81, 155.56, 174.61, 196.00, 233.08,
           261.63, 311.13, 349.23, 392.00, 466.16]
 _AMPS  = [0.30,   0.18,   0.22,   0.26,   0.16,
           0.18,   0.11,   0.13,   0.16,   0.09]
 
-mix = np.zeros_like(t)
+mix = np.zeros(len(t), dtype=np.float32)
 for _freq, _amp in zip(_NOTES, _AMPS):
-    _w  = _amp       * np.sin(2 * np.pi * _freq * t)
-    _w += _amp * 0.3 * np.sin(2 * np.pi * _freq * 2 * t)
-    _w += _amp * 0.1 * np.sin(2 * np.pi * _freq * 3 * t)
-    mix += _w * (0.90 + 0.10 * np.sin(2 * np.pi * 0.07 * t + _freq))
+    _w  = _amp       * np.sin(2 * np.pi * _freq * t).astype(np.float32)
+    _w += _amp * 0.3 * np.sin(2 * np.pi * _freq * 2 * t).astype(np.float32)
+    _w += _amp * 0.1 * np.sin(2 * np.pi * _freq * 3 * t).astype(np.float32)
+    mix += _w
 
 mix /= (np.max(np.abs(mix)) + 1e-9)
 mix *= 0.55
 
-_fi = min(int(SR * 4.0), len(mix) // 4)
-_fo = min(int(SR * 7.0), len(mix) // 4)
-mix[:_fi]  *= np.linspace(0, 1, _fi)
-mix[-_fo:] *= np.linspace(1, 0, _fo)
+_fi = int(SR * 3.0)
+_fo = int(SR * 4.0)
+mix[:_fi]  *= np.linspace(0, 1, _fi, dtype=np.float32)
+mix[-_fo:] *= np.linspace(1, 0, _fo, dtype=np.float32)
 
-_wav     = f\'{WORK_DIR}/ambient_music.wav\'
-MUSIC_MP3 = f\'{WORK_DIR}/ambient_music.mp3\'
-_pcm = (mix * 32767).astype(np.int16)
-with wave.open(_wav, \'w\') as _wf:
+_loop_wav = f\'{WORK_DIR}/ambient_loop.wav\'
+MUSIC_MP3  = f\'{WORK_DIR}/ambient_music.mp3\'
+_pcm = (mix * 32767).clip(-32768, 32767).astype(np.int16)
+with wave.open(_loop_wav, \'w\') as _wf:
     _wf.setnchannels(1)
     _wf.setsampwidth(2)
     _wf.setframerate(SR)
     _wf.writeframes(_pcm.tobytes())
-subprocess.run(["ffmpeg", "-i", _wav, "-q:a", "4", MUSIC_MP3, "-y"],
-               capture_output=True, check=True)
-os.remove(_wav)
+
+# FFmpeg loops the 90-second clip to cover the full video + fade out at end
+_fade_start = max(0, _music_dur - 5.0)
+subprocess.run([
+    "ffmpeg", "-y",
+    "-stream_loop", "-1", "-i", _loop_wav,
+    "-t", str(_music_dur),
+    "-af", f"afade=t=out:st={_fade_start:.1f}:d=5",
+    "-q:a", "4", MUSIC_MP3,
+], capture_output=True, check=True)
+os.remove(_loop_wav)
 
 print(f"Music: {_music_dur:.0f}s ambient pentatonic drone -> {MUSIC_MP3}")
 print("\\nMusic done. Run Cell 8.")
