@@ -291,42 +291,62 @@ CELL_IMAGES = code('''\
 # == CELL 6: Generate SDXL Stick Figure Images ================================
 import json, os, torch
 
-if "pipe" not in dir():
-    raise RuntimeError("Run Cell 2 first to load the SDXL pipeline!")
 if "SCENE_DATA" not in dir():
+    import json as _json
     with open(f\'{WORK_DIR}/scene_data.json\') as _f:
-        SCENE_DATA = json.load(_f)
+        SCENE_DATA = _json.load(_f)
 
 _n = len(SCENE_DATA)
-_est = max(1, round(_n * 25 / 60))
-print(f"Generating {_n} stick figure images with SDXL...")
-print(f"Estimated time: ~{_est} min on T4 GPU\\n")
+_missing = [_sc for _sc in SCENE_DATA if not os.path.exists(_sc[\'image\'])]
 
-for _i, _sc in enumerate(SCENE_DATA):
-    _img_path = _sc[\'image\']
+if _missing and "pipe" not in dir():
+    print(f"  {len(_missing)} images still need generating — loading SDXL model first.")
+    print("  (If you already ran Cell 2 this session, ignore this message.)\\n")
+    from diffusers import StableDiffusionXLPipeline, DPMSolverMultistepScheduler
+    pipe = StableDiffusionXLPipeline.from_pretrained(
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        torch_dtype=torch.float16, variant="fp16", use_safetensors=True,
+    ).to("cuda")
+    pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+    pipe.enable_model_cpu_offload()
+    try:
+        pipe.enable_xformers_memory_efficient_attention()
+    except Exception:
+        pass
+    print("  SDXL loaded.\\n")
 
-    if os.path.exists(_img_path):
-        print(f"  [{_i+1}/{_n}] cached  {os.path.basename(_img_path)}")
-        continue
+if not _missing:
+    print(f"All {_n} images already generated — nothing to do. Run Cell 7.")
+else:
+    _est = max(1, round(len(_missing) * 25 / 60))
+    print(f"Generating {len(_missing)}/{_n} stick figure images with SDXL...")
+    print(f"Estimated time: ~{_est} min on T4 GPU\\n")
 
-    _prompt = build_prompt(_sc[\'text\'])
-    print(f"  [{_i+1}/{_n}] {_sc[\'duration\']:.1f}s  {_sc[\'text\'][:50]}...")
-    print(f"    -> {_prompt[:80]}")
+    for _i, _sc in enumerate(SCENE_DATA):
+        _img_path = _sc[\'image\']
 
-    with torch.inference_mode():
-        _image = pipe(
-            prompt=_prompt,
-            negative_prompt=NEG_PROMPT,
-            width=1280,
-            height=720,
-            num_inference_steps=20,
-            guidance_scale=7.5,
-        ).images[0]
+        if os.path.exists(_img_path):
+            print(f"  [{_i+1}/{_n}] cached  {os.path.basename(_img_path)}")
+            continue
 
-    _image.save(_img_path)
-    print(f"    saved: {os.path.basename(_img_path)}")
+        _prompt = build_prompt(_sc[\'text\'])
+        print(f"  [{_i+1}/{_n}] {_sc[\'duration\']:.1f}s  {_sc[\'text\'][:50]}...")
+        print(f"    -> {_prompt[:80]}")
 
-print(f"\\nAll {_n} images done. Run Cell 7.")
+        with torch.inference_mode():
+            _image = pipe(
+                prompt=_prompt,
+                negative_prompt=NEG_PROMPT,
+                width=1280,
+                height=720,
+                num_inference_steps=20,
+                guidance_scale=7.5,
+            ).images[0]
+
+        _image.save(_img_path)
+        print(f"    saved: {os.path.basename(_img_path)}")
+
+    print(f"\\nAll {_n} images done. Run Cell 7.")
 ''')
 
 CELL_MUSIC = code('''\
