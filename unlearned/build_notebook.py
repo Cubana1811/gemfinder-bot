@@ -27,23 +27,25 @@ CELL_TITLE = md("""\
 # UNLEARNED — AI Stick Figure Video Generator
 ### Psychology · Ancient History · Behavioral Science
 ---
-**SDXL generates a unique stick figure drawing for every scene — perfectly synced to the voiceover.**
+SDXL generates a unique stick figure drawing for every scene — perfectly synced to the voiceover.
 
-Each image is AI-drawn to match what the narrator says.
-Hospital scene → stick figure hospital. Animals → stick figure animals. No stock images. No text on screen.
+Each image is AI-drawn to match what the narrator says. No stock images. No text on screen.
 
 **Run cells in order using a T4 GPU runtime:**
-1. **Cell 1** — Install packages (~3 min, once per session)
-2. **Cell 2** — Setup and load SDXL model (~2 min, requires T4 GPU)
-3. **Cell 3** — Mount Google Drive
-4. **Cell 4** — Enter title and paste script, then click Load Script
-5. **Cell 5** — Parse script and generate voiceover
-6. **Cell 6** — Generate SDXL stick figure images (~25 sec/scene)
-7. **Cell 7** — Generate background music
-8. **Cell 8** — Assemble final video
-9. **Cell 9** — Save to Google Drive and download
 
-> Requires T4 GPU runtime · Auto-saves to Google Drive
+| Cell | What it does |
+|------|-------------|
+| Cell 1 | Install packages (~3 min, once per session) |
+| Cell 2 | Setup and load SDXL model (~2 min, T4 GPU required) |
+| Cell 3 | Mount Google Drive |
+| Cell 4 | Type your episode title and click Set Title |
+| Cell 5 | Upload your script as a .txt file — voiceover is generated automatically |
+| Cell 6 | SDXL draws a stick figure image for every scene (~25 sec/scene) |
+| Cell 7 | Generate background music |
+| Cell 8 | Assemble the final video |
+| Cell 9 | Save to Google Drive and download |
+
+> Requires T4 GPU runtime. Set it before Cell 2: Runtime -> Change runtime type -> T4 GPU
 """)
 
 CELL_INSTALL = code('''\
@@ -63,7 +65,7 @@ for _pkg in _pkgs:
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", _pkg], capture_output=True)
     print(f"  {_pkg}: ok")
 
-print("\\n Done! Run Cell 2.")
+print("\\nDone! Run Cell 2.")
 ''')
 
 CELL_SETUP = code('''\
@@ -100,8 +102,8 @@ _STOPS = set((
     "now after before during while because since though although like even get "
     "got very much many such way make made use used using take took time "
     "know knew think thought say said see saw come came go went back new old "
-    "other another both own long well still only over own day year life same "
-    "become became through between again those these its our"
+    "other another both own long well still only over day year life same "
+    "become became through between again those these"
 ).split())
 
 def extract_keywords(text, n=7):
@@ -114,7 +116,7 @@ NEG_PROMPT = (
     "realistic, photographic, 3d render, complex, colorful, painting, "
     "detailed, text, watermark, blurry, photograph, logo, signature, "
     "color fill, gradient, shadow, realistic people, anime, cartoon, "
-    "photo, human face, portrait, background detail, decoration"
+    "photo, human face, portrait, background detail"
 )
 
 def build_prompt(text):
@@ -129,7 +131,7 @@ def build_prompt(text):
 
 # -- Load SDXL -----------------------------------------------------------------
 print("Loading SDXL (stabilityai/stable-diffusion-xl-base-1.0)...")
-print("First load: downloads ~6.9 GB. Cached loads: ~2 min.")
+print("First load downloads ~6.9 GB. Cached loads take ~2 min.")
 from diffusers import StableDiffusionXLPipeline, DPMSolverMultistepScheduler
 
 pipe = StableDiffusionXLPipeline.from_pretrained(
@@ -149,7 +151,7 @@ except Exception:
 
 print(f"\\nVoice  : {VOICE}")
 print(f"WorkDir: {WORK_DIR}")
-print("\\n SDXL ready. Run Cell 3.")
+print("\\nSDXL ready. Run Cell 3.")
 ''')
 
 CELL_DRIVE = code('''\
@@ -160,15 +162,13 @@ drive.mount("/content/drive", force_remount=False)
 DRIVE_FOLDER = "/content/drive/MyDrive/Unlearned"
 os.makedirs(DRIVE_FOLDER, exist_ok=True)
 print(f"Drive ready: {DRIVE_FOLDER}")
-print("\\n Drive mounted. Run Cell 4.")
+print("\\nDrive mounted. Run Cell 4.")
 ''')
 
-CELL_INPUT = code('''\
-# == CELL 4: Enter Title & Paste Script =======================================
-# Run this cell. Two text boxes appear.
-# Type your episode title in the top box.
-# Paste your full script in the large box.
-# Click Load Script, then run Cell 5.
+CELL_TITLE_INPUT = code('''\
+# == CELL 4: Set Episode Title =================================================
+# Type your episode title in the box below, then click Set Title.
+# Do NOT paste your script here — that happens in Cell 5 via file upload.
 
 import ipywidgets as widgets
 from IPython.display import display, clear_output
@@ -179,41 +179,40 @@ _title_box = widgets.Text(
     layout=widgets.Layout(width="90%"),
     style={"description_width": "60px"},
 )
-_script_box = widgets.Textarea(
-    value="",
-    placeholder="Paste your full script here...",
-    description="Script:",
-    layout=widgets.Layout(width="90%", height="320px"),
-    style={"description_width": "60px"},
-)
-_btn = widgets.Button(description="Load Script", button_style="success")
+_btn = widgets.Button(description="Set Title", button_style="success",
+                      layout=widgets.Layout(width="200px"))
 _out = widgets.Output()
 
-def _load(_):
-    global EPISODE_TITLE, _raw
+def _set(_):
+    global EPISODE_TITLE
     EPISODE_TITLE = _title_box.value.strip()
-    _raw = _script_box.value.strip()
     with _out:
         clear_output()
-        if not _raw:
-            print("Paste your script first!")
-        elif not EPISODE_TITLE:
-            print("Enter a title first!")
+        if not EPISODE_TITLE:
+            print("Type your episode title first!")
         else:
-            _wc  = len(_raw.split())
-            _est = round(_wc / 2.8 / 60, 1)
-            print(f"Script : {_wc} words  ->  ~{_est} min video")
-            print(f"Episode: {EPISODE_TITLE}")
-            print("\\n Script loaded. Run Cell 5.")
+            with open(f\'{WORK_DIR}/episode_title.txt\', \'w\') as _f:
+                _f.write(EPISODE_TITLE)
+            print(f"Title saved: {EPISODE_TITLE}")
+            print("Now run Cell 5 to upload your script as a .txt file.")
 
-_btn.on_click(_load)
-display(_title_box, _script_box, _btn, _out)
+_btn.on_click(_set)
+display(_title_box, _btn, _out)
 ''')
 
-CELL_PARSE_VOICE = code('''\
-# == CELL 5: Parse Script & Generate Voiceover ================================
+CELL_UPLOAD_VOICE = code('''\
+# == CELL 5: Upload Script & Generate Voiceover ================================
+# 1. Run this cell.
+# 2. A "Choose Files" button will appear — click it.
+# 3. Select your script saved as a plain .txt file from your computer.
+# 4. The voiceover will generate automatically. Do NOT paste script text here.
+
+from google.colab import files as _gcf
 import edge_tts, asyncio, re, json
 import nest_asyncio; nest_asyncio.apply()
+
+if "EPISODE_TITLE" not in dir() or not EPISODE_TITLE:
+    raise RuntimeError("Run Cell 4 first and click Set Title!")
 
 def parse_scenes(text, max_words=22):
     text = re.sub(r\'[ \\t]+\', \' \', text.strip())
@@ -244,14 +243,26 @@ async def _tts(text, path):
     comm = edge_tts.Communicate(text, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH)
     await comm.save(path)
 
-if "_raw" not in dir() or not _raw:
-    raise RuntimeError("Run Cell 4 first and click Load Script!")
+# -- Upload script file --------------------------------------------------------
+print("Click Choose Files below and select your script as a .txt file.")
+print("Your script can contain any characters (dashes, apostrophes, etc.)\\n")
+_up = _gcf.upload()
+if not _up:
+    raise RuntimeError("No file uploaded. Run this cell again.")
 
-print("Parsing script...")
+_fname = list(_up.keys())[0]
+_raw = _up[_fname].decode("utf-8", errors="replace").strip()
+_wc = len(_raw.split())
+_est = round(_wc / 2.8 / 60, 1)
+print(f"\\nLoaded : {_fname}")
+print(f"Words  : {_wc}  (~{_est} min video)")
+
+# -- Parse & generate voiceover ------------------------------------------------
+print("\\nParsing script...")
 _raw_scenes = parse_scenes(_raw)
 print(f"  {len(_raw_scenes)} scenes")
 
-print("\\nGenerating voiceover...")
+print("\\nGenerating voiceover (edge-tts)...")
 SCENE_DATA = []
 _loop = asyncio.get_event_loop()
 for _i, _text in enumerate(_raw_scenes):
@@ -270,12 +281,10 @@ for _i, _text in enumerate(_raw_scenes):
 
 with open(f\'{WORK_DIR}/scene_data.json\', \'w\') as _f:
     json.dump(SCENE_DATA, _f, indent=2, ensure_ascii=False)
-with open(f\'{WORK_DIR}/episode_title.txt\', \'w\') as _f:
-    _f.write(EPISODE_TITLE)
 
 _total = sum(s[\'duration\'] for s in SCENE_DATA)
 print(f"\\nTotal : {_total:.0f}s  ({_total/60:.1f} min)  |  Scenes: {len(SCENE_DATA)}")
-print("\\n Voiceover done. Run Cell 6.")
+print("\\nVoiceover done. Run Cell 6.")
 ''')
 
 CELL_IMAGES = code('''\
@@ -302,7 +311,7 @@ for _i, _sc in enumerate(SCENE_DATA):
 
     _prompt = build_prompt(_sc[\'text\'])
     print(f"  [{_i+1}/{_n}] {_sc[\'duration\']:.1f}s  {_sc[\'text\'][:50]}...")
-    print(f"    prompt: {_prompt[:80]}...")
+    print(f"    -> {_prompt[:80]}")
 
     with torch.inference_mode():
         _image = pipe(
@@ -317,7 +326,7 @@ for _i, _sc in enumerate(SCENE_DATA):
     _image.save(_img_path)
     print(f"    saved: {os.path.basename(_img_path)}")
 
-print(f"\\n All {_n} images done. Run Cell 7.")
+print(f"\\nAll {_n} images done. Run Cell 7.")
 ''')
 
 CELL_MUSIC = code('''\
@@ -335,7 +344,6 @@ _music_dur = _total_dur + 10.0
 SR = 44100
 t  = np.linspace(0, _music_dur, int(SR * _music_dur), endpoint=False)
 
-# C major pentatonic ambient drone
 _NOTES = [130.81, 155.56, 174.61, 196.00, 233.08,
           261.63, 311.13, 349.23, 392.00, 466.16]
 _AMPS  = [0.30,   0.18,   0.22,   0.26,   0.16,
@@ -369,7 +377,7 @@ subprocess.run(["ffmpeg", "-i", _wav, "-q:a", "4", MUSIC_MP3, "-y"],
 os.remove(_wav)
 
 print(f"Music: {_music_dur:.0f}s ambient pentatonic drone -> {MUSIC_MP3}")
-print("\\n Music done. Run Cell 8.")
+print("\\nMusic done. Run Cell 8.")
 ''')
 
 CELL_ASSEMBLE = code('''\
@@ -406,7 +414,7 @@ for _i, _sc in enumerate(SCENE_DATA):
     elif _p == 2:
         _zp = f"z=\'min(zoom+0.0003,1.12)\':x=\'iw-iw/zoom\':y=\'ih-ih/zoom\':d={_nf}"
     else:
-        _zp = f"z=\'if(lte(zoom\\,1.0)\\,1.12\\,zoom-0.0003)\':x=\'iw/2-(iw/zoom/2)\':y=\'ih/2-(ih/zoom/2)\':d={_nf}"
+        _zp = f"z=\'if(lte(zoom,1.0),1.12,zoom-0.0003)\':x=\'iw/2-(iw/zoom/2)\':y=\'ih/2-(ih/zoom/2)\':d={_nf}"
 
     _r = subprocess.run([
         "ffmpeg", "-y",
@@ -467,7 +475,7 @@ if _r.returncode != 0:
 _mb = os.path.getsize(FINAL_VIDEO) / 1_048_576
 print(f"\\nFinal video : {FINAL_VIDEO}")
 print(f"Size        : {_mb:.1f} MB")
-print("\\n Assembly done. Run Cell 9 to download.")
+print("\\nAssembly done. Run Cell 9 to download.")
 ''')
 
 CELL_DOWNLOAD = code('''\
@@ -499,7 +507,7 @@ _cf.download(FINAL_VIDEO)
 
 if "SCENE_DATA" in dir():
     _total = sum(s[\'duration\'] for s in SCENE_DATA) / 60
-    print(f"\\n Complete!")
+    print(f"\\nComplete!")
     print(f"Episode : {EPISODE_TITLE}")
     print(f"Duration: ~{_total:.1f} min")
 ''')
@@ -508,7 +516,7 @@ if "SCENE_DATA" in dir():
 
 CELLS = [
     CELL_TITLE, CELL_INSTALL, CELL_SETUP, CELL_DRIVE,
-    CELL_INPUT, CELL_PARSE_VOICE, CELL_IMAGES,
+    CELL_TITLE_INPUT, CELL_UPLOAD_VOICE, CELL_IMAGES,
     CELL_MUSIC, CELL_ASSEMBLE, CELL_DOWNLOAD,
 ]
 
