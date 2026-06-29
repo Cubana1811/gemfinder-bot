@@ -24,43 +24,44 @@ def code(src):
 # ── CELLS ──────────────────────────────────────────────────────────────────────
 
 CELL_TITLE = md("""\
-# UNLEARNED — AI Stick Figure Video Generator
+# UNLEARNED — Flat Icon Video Generator
 ### Psychology · Ancient History · Behavioral Science
 ---
-SDXL generates a unique stick figure drawing for every scene — perfectly synced to the voiceover.
+Generates a clean flat-icon image for every scene — white background, bold caption, perfectly synced voiceover.
 
-Each image is AI-drawn to match what the narrator says. No stock images. No text on screen.
+Icons are fetched automatically from the Iconify library (150 k+ free icons). No GPU needed. No AI model download.
 
-**Run cells in order using a T4 GPU runtime:**
+**Run cells in order — any runtime type works (CPU is fine):**
 
 | Cell | What it does |
 |------|-------------|
-| Cell 1 | Install packages (~3 min, once per session) |
-| Cell 2 | Setup and load SDXL model (~2 min, T4 GPU required) |
+| Cell 1 | Install packages (~2 min, once per session) |
+| Cell 2 | Setup directories and voice settings |
 | Cell 3 | Mount Google Drive |
 | Cell 4 | Type your episode title and click Set Title |
 | Cell 5 | Upload your script as a .txt file — voiceover is generated automatically |
-| Cell 6 | SDXL draws a stick figure image for every scene (~25 sec/scene) |
+| Cell 6 | Fetch icons + render a scene image for every line (~2 sec/scene) |
 | Cell 7 | Generate background music |
 | Cell 8 | Assemble the final video |
 | Cell 9 | Save to Google Drive and download |
 
-> Requires T4 GPU runtime. Set it before Cell 2: Runtime -> Change runtime type -> T4 GPU
+> No GPU required. CPU runtime works fine — image generation takes only ~2 seconds per scene.
 """)
 
 CELL_INSTALL = code('''\
 # == CELL 1: Install ==========================================================
-print("Installing packages — runs once per session (~3-5 min)...")
+print("Installing packages — runs once per session (~2 min)...")
 import subprocess, sys
 
 def _sh(cmd):
     r = subprocess.run(cmd, capture_output=True, text=True)
     return r.returncode == 0
 
-_sh(["apt-get", "install", "-y", "-q", "ffmpeg"])
-print("  ffmpeg: ok")
+# libcairo2 is needed by cairosvg to convert SVG icons to PNG
+_sh(["apt-get", "install", "-y", "-q", "ffmpeg", "libcairo2"])
+print("  ffmpeg + libcairo2: ok")
 
-_pkgs = ["diffusers", "transformers", "accelerate", "xformers", "edge-tts", "nest_asyncio"]
+_pkgs = ["cairosvg", "requests", "Pillow", "edge-tts", "nest_asyncio"]
 for _pkg in _pkgs:
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", _pkg], capture_output=True)
     print(f"  {_pkg}: ok")
@@ -69,16 +70,11 @@ print("\\nDone! Run Cell 2.")
 ''')
 
 CELL_SETUP = code('''\
-# == CELL 2: Setup & Load SDXL ================================================
-import os, json, re, subprocess, asyncio, torch
+# == CELL 2: Setup ============================================================
+# No GPU required — icons are fetched from the Iconify API (free, no key needed).
+import os, json, re, subprocess, asyncio
 import nest_asyncio
 nest_asyncio.apply()
-
-if not torch.cuda.is_available():
-    raise RuntimeError(
-        "No GPU detected!\\n"
-        "Switch to T4 GPU: Runtime -> Change runtime type -> T4 GPU"
-    )
 
 WORK_DIR  = "/content/unlearned"
 IMG_DIR   = f"{WORK_DIR}/images"
@@ -92,66 +88,10 @@ VOICE_RATE  = "+2%"
 VOICE_PITCH = "-3Hz"
 MUSIC_VOL   = 0.08
 
-# -- Keyword extractor ---------------------------------------------------------
-_STOPS = set((
-    "a an the in on at is was are were it its of to and or but for with by "
-    "from this that they them their we our you your he she his her not no as "
-    "so be been has have had do does did will would could should may might also "
-    "just than then when where who which what how why if all one two three "
-    "first last into out up about more most some any each every can there here "
-    "now after before during while because since though although like even get "
-    "got very much many such way make made use used using take took time "
-    "know knew think thought say said see saw come came go went back new old "
-    "other another both own long well still only over day year life same "
-    "become became through between again those these"
-).split())
-
-def extract_keywords(text, n=7):
-    words = re.findall(r\'\\b[a-zA-Z]{3,}\\b\', text.lower())
-    kw = [w for w in words if w not in _STOPS]
-    kw.sort(key=len, reverse=True)
-    return ", ".join(list(dict.fromkeys(kw))[:n])
-
-NEG_PROMPT = (
-    "realistic, photographic, 3d render, complex, colorful, painting, "
-    "detailed, text, watermark, blurry, photograph, logo, signature, "
-    "color fill, gradient, shadow, realistic people, anime, cartoon, "
-    "photo, human face, portrait, background detail"
-)
-
-def build_prompt(text):
-    kw = extract_keywords(text)
-    return (
-        f"stick figure drawing of {kw}, "
-        "simple black ink lines on white paper, "
-        "minimalist hand-drawn sketch, clean line art, "
-        "educational illustration, no fill, no color, "
-        "stick man figures, crude simple drawing"
-    )
-
-# -- Load SDXL -----------------------------------------------------------------
-print("Loading SDXL (stabilityai/stable-diffusion-xl-base-1.0)...")
-print("First load downloads ~6.9 GB. Cached loads take ~2 min.")
-from diffusers import StableDiffusionXLPipeline, DPMSolverMultistepScheduler
-
-pipe = StableDiffusionXLPipeline.from_pretrained(
-    "stabilityai/stable-diffusion-xl-base-1.0",
-    torch_dtype=torch.float16,
-    variant="fp16",
-    use_safetensors=True,
-)
-pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-pipe.enable_model_cpu_offload()
-
-try:
-    pipe.enable_xformers_memory_efficient_attention()
-    print("  xformers: enabled")
-except Exception:
-    print("  xformers: not available (OK)")
-
-print(f"\\nVoice  : {VOICE}")
-print(f"WorkDir: {WORK_DIR}")
-print("\\nSDXL ready. Run Cell 3.")
+print(f"Working directory : {WORK_DIR}")
+print(f"Voice             : {VOICE}")
+print("\\nSetup complete — no GPU needed, no model download!")
+print("Run Cell 3.")
 ''')
 
 CELL_DRIVE = code('''\
@@ -298,16 +238,18 @@ print("\\nVoiceover done. Run Cell 6.")
 ''')
 
 CELL_IMAGES = code('''\
-# == CELL 6: Generate SDXL Stick Figure Images ================================
-# Fully session-restart safe. If Colab disconnected after this cell ran
-# previously, re-running it detects all cached images and skips straight
-# to "Run Cell 7" — nothing is regenerated, no model needed.
-import json as _json, os, re, torch
+# == CELL 6: Fetch Icons & Render Scene Images =================================
+# Session-restart safe. Checks cached images first — reruns skip instantly.
+# Uses Iconify API (free, 150 k+ icons, no key) + cairosvg + Pillow.
+# No GPU needed. ~2 seconds per scene.
+import json as _json, os, re, io, requests
+import cairosvg
+from PIL import Image, ImageDraw, ImageFont
 
-# Hardcode paths so this cell never depends on Cell 2 being in scope
-_WDIR = "/content/unlearned"
-_IDIR = f"{_WDIR}/images"
+_WDIR  = "/content/unlearned"
+_IDIR  = f"{_WDIR}/images"
 _JPATH = f"{_WDIR}/scene_data.json"
+os.makedirs(_IDIR, exist_ok=True)
 
 if "SCENE_DATA" not in dir():
     if not os.path.exists(_JPATH):
@@ -315,11 +257,13 @@ if "SCENE_DATA" not in dir():
     with open(_JPATH) as _f:
         SCENE_DATA = _json.load(_f)
 
-_n = len(SCENE_DATA)
-_missing = [_sc for _sc in SCENE_DATA if not os.path.exists(_sc[\'image\'])]
+_n       = len(SCENE_DATA)
+_missing = [_sc for _sc in SCENE_DATA if not os.path.exists(_sc["image"])]
 
-# Re-define prompt helpers if Cell 2 was not run this session
-if _missing and "build_prompt" not in dir():
+if not _missing:
+    print(f"All {_n} images already on disk. Run Cell 7.")
+else:
+    # ── Stop-word list for keyword extraction ──────────────────────────────────
     _STOPS = set((
         "a an the in on at is was are were it its of to and or but for with by "
         "from this that they them their we our you your he she his her not no as "
@@ -332,65 +276,215 @@ if _missing and "build_prompt" not in dir():
         "other another both own long well still only over day year life same "
         "become became through between again those these"
     ).split())
-    def extract_keywords(text, n=7):
-        words = re.findall(r\'\\b[a-zA-Z]{3,}\\b\', text.lower())
-        kw = [w for w in words if w not in _STOPS]
-        kw.sort(key=len, reverse=True)
-        return ", ".join(list(dict.fromkeys(kw))[:n])
-    NEG_PROMPT = (
-        "realistic, photographic, 3d render, complex, colorful, painting, "
-        "detailed, text, watermark, blurry, photograph, logo, signature, "
-        "color fill, gradient, shadow, realistic people, anime, cartoon, "
-        "photo, human face, portrait, background detail"
-    )
-    def build_prompt(text):
-        kw = extract_keywords(text)
-        return (
-            f"stick figure drawing of {kw}, "
-            "simple black ink lines on white paper, "
-            "minimalist hand-drawn sketch, clean line art, "
-            "educational illustration, no fill, no color, "
-            "stick man figures, crude simple drawing"
-        )
 
-# Load SDXL only when images are actually missing and pipe not already loaded
-if _missing and "pipe" not in dir():
-    print(f"{len(_missing)} images to generate — loading SDXL (session restore)...")
-    from diffusers import StableDiffusionXLPipeline, DPMSolverMultistepScheduler
-    pipe = StableDiffusionXLPipeline.from_pretrained(
-        "stabilityai/stable-diffusion-xl-base-1.0",
-        torch_dtype=torch.float16, variant="fp16", use_safetensors=True,
-    )
-    pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-    pipe.enable_model_cpu_offload()
-    try:
-        pipe.enable_xformers_memory_efficient_attention()
-    except Exception:
-        pass
-    print("SDXL ready.\\n")
+    def _kw(text, n=4):
+        words = re.findall(r"\\b[a-zA-Z]{4,}\\b", text.lower())
+        seen, out = set(), []
+        for w in words:
+            if w not in _STOPS and w not in seen:
+                seen.add(w); out.append(w)
+        return out[:n]
 
-if not _missing:
-    print(f"All {_n} images already on disk. Run Cell 7.")
-else:
-    print(f"Generating {len(_missing)}/{_n} images (~{max(1,round(len(_missing)*25/60))} min)...\\n")
+    # ── Keyword → Iconify search term map (psychology/history/science topics) ──
+    _MAP = {
+        "brain":"brain","mind":"brain","think":"brain","thought":"brain","memory":"memory",
+        "learn":"graduation-cap","study":"book-open","school":"school","book":"book-open",
+        "knowledge":"brain","smart":"lightbulb","intelligence":"lightbulb","idea":"lightbulb",
+        "happy":"smile","happiness":"smile","joy":"smile","laugh":"laugh",
+        "sad":"frown","sadness":"frown","depress":"cloud-rain","grief":"frown",
+        "angry":"angry","anger":"angry","rage":"angry","frustrat":"angry",
+        "fear":"alert-triangle","anxiety":"alert-triangle","stress":"alert-circle","worry":"alert-circle",
+        "calm":"leaf","peace":"dove","relax":"spa",
+        "love":"heart","heart":"heart","emotion":"heart","feel":"heart",
+        "friend":"users","social":"users","people":"users","group":"users","team":"users",
+        "alone":"user","lonely":"user","person":"user","human":"user","individual":"user",
+        "money":"dollar-sign","wealth":"dollar-sign","rich":"dollar-sign","poor":"coins",
+        "work":"briefcase","job":"briefcase","career":"briefcase","boss":"briefcase",
+        "success":"trophy","goal":"target","winner":"trophy","achieve":"star",
+        "fail":"x-circle","mistake":"x-circle","error":"x-circle","wrong":"x-circle",
+        "trust":"handshake","honest":"shield-check","lie":"eye-off","cheat":"eye-off",
+        "power":"zap","strong":"shield","weak":"meh","control":"sliders",
+        "leader":"crown","leader":"crown","authority":"crown","king":"crown",
+        "change":"refresh-cw","grow":"trending-up","improve":"trending-up","progress":"trending-up",
+        "time":"clock","clock":"clock","hour":"clock","minute":"clock","slow":"clock",
+        "sleep":"moon","rest":"moon","tired":"moon","energy":"sun","wake":"sun",
+        "food":"coffee","eat":"utensils","diet":"salad","health":"heart-pulse",
+        "body":"activity","exercise":"dumbbell","fitness":"dumbbell","sport":"activity",
+        "talk":"message-circle","speak":"message-circle","voice":"mic","listen":"headphones",
+        "phone":"smartphone","media":"share-2","internet":"wifi","tech":"cpu",
+        "family":"home","parent":"users","child":"baby","mother":"user","father":"user",
+        "death":"skull","dead":"skull","grave":"skull","kill":"skull","murder":"skull",
+        "war":"sword","fight":"sword","battle":"sword","weapon":"shield",
+        "history":"landmark","ancient":"landmark","empire":"landmark","king":"crown",
+        "science":"flask","research":"microscope","discover":"search","experiment":"flask",
+        "nature":"tree","earth":"globe","environment":"leaf","plant":"leaf","animal":"paw",
+        "secret":"lock","hidden":"eye-off","mystery":"question-mark","unknown":"question-mark",
+        "question":"help-circle","answer":"check-circle","truth":"check-circle","fact":"info",
+    }
+
+    # ── Iconify helpers ─────────────────────────────────────────────────────────
+    _ICON_COLOR = "%23374151"   # dark slate gray, URL-encoded
+    _ICON_SIZE  = 480
+    _SVG_CACHE  = {}            # icon_id -> png bytes, avoids re-fetching
+
+    def _find_icon(keywords):
+        for kw in keywords:
+            term = _MAP.get(kw, kw)
+            try:
+                r = requests.get(
+                    f"https://api.iconify.design/search?query={term}&limit=1",
+                    timeout=8)
+                if r.ok:
+                    icons = r.json().get("icons", [])
+                    if icons:
+                        return icons[0]
+            except Exception:
+                pass
+        return None
+
+    def _icon_png(icon_id):
+        if icon_id in _SVG_CACHE:
+            return _SVG_CACHE[icon_id]
+        prefix, name = icon_id.split(":", 1)
+        url = (f"https://api.iconify.design/{prefix}/{name}.svg"
+               f"?color={_ICON_COLOR}&width={_ICON_SIZE}&height={_ICON_SIZE}")
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        png = cairosvg.svg2png(bytestring=r.content,
+                               output_width=_ICON_SIZE, output_height=_ICON_SIZE)
+        _SVG_CACHE[icon_id] = png
+        return png
+
+    # ── PIL rendering helpers ───────────────────────────────────────────────────
+    W, H = 1280, 720
+
+    def _load_font(size):
+        for path in [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        ]:
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
+        return ImageFont.load_default()
+
+    def _wrap(text, font, max_w, draw):
+        words = text.split()
+        lines, line = [], []
+        for w in words:
+            test = " ".join(line + [w])
+            bbox = draw.textbbox((0, 0), test, font=font)
+            if bbox[2] - bbox[0] <= max_w:
+                line.append(w)
+            else:
+                if line: lines.append(" ".join(line))
+                line = [w]
+        if line: lines.append(" ".join(line))
+        return lines or [""]
+
+    def _title_card(text):
+        """Dark red card with white horizontal rules and white bold text — like the section headers in the reference."""
+        img = Image.new("RGB", (W, H), "#7B0000")
+        draw = ImageDraw.Draw(img)
+        # Horizontal white lines (decorative)
+        for y in [int(H * 0.18), int(H * 0.82)]:
+            draw.rectangle([60, y, W - 60, y + 3], fill="white")
+        font = _load_font(68)
+        lines = _wrap(text, font, W - 140, draw)
+        line_h = 84
+        total_h = len(lines) * line_h
+        y = (H - total_h) // 2
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            tw = bbox[2] - bbox[0]
+            draw.text(((W - tw) // 2, y), line, fill="white", font=font)
+            y += line_h
+        return img
+
+    def _icon_card(text, png_bytes):
+        """White background — icon centered in top 58% — bold caption at bottom."""
+        img  = Image.new("RGB", (W, H), "white")
+        icon = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+
+        # Scale icon to fit upper area
+        max_icon = int(H * 0.54)
+        icon.thumbnail((max_icon, max_icon), Image.LANCZOS)
+
+        # Paste icon centered horizontally, vertically in top 60%
+        ix = (W - icon.width) // 2
+        iy = max(28, (int(H * 0.58) - icon.height) // 2)
+        img.paste(icon, (ix, iy), icon)
+
+        # Caption
+        draw = ImageDraw.Draw(img)
+        font = _load_font(46)
+        lines = _wrap(text, font, W - 120, draw)
+        line_h = 60
+        total_h = len(lines) * line_h
+        y = H - total_h - 38
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            tw = bbox[2] - bbox[0]
+            x = (W - tw) // 2
+            # Subtle outline for readability
+            for dx, dy in [(-1,-1),(1,-1),(-1,1),(1,1)]:
+                draw.text((x+dx, y+dy), line, fill="#d0d0d0", font=font)
+            draw.text((x, y), line, fill="#1a1a1a", font=font)
+            y += line_h
+        return img
+
+    def _text_card(text):
+        """Fallback: white background, large bold centered text only."""
+        img  = Image.new("RGB", (W, H), "white")
+        draw = ImageDraw.Draw(img)
+        font = _load_font(52)
+        lines = _wrap(text, font, W - 120, draw)
+        line_h = 66
+        total_h = len(lines) * line_h
+        y = (H - total_h) // 2
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            tw = bbox[2] - bbox[0]
+            draw.text(((W - tw) // 2, y), line, fill="#1a1a1a", font=font)
+            y += line_h
+        return img
+
+    # ── Generate each scene ────────────────────────────────────────────────────
+    print(f"Generating {len(_missing)}/{_n} images (icon fetch + PIL — no GPU)...\\n")
+
     for _i, _sc in enumerate(SCENE_DATA):
-        _img_path = _sc[\'image\']
+        _img_path = _sc["image"]
         if os.path.exists(_img_path):
-            print(f"  [{_i+1}/{_n}] cached  {os.path.basename(_img_path)}")
+            print(f"  [{_i+1}/{_n}] cached")
             continue
-        _prompt = build_prompt(_sc[\'text\'])
-        print(f"  [{_i+1}/{_n}] {_sc[\'duration\']:.1f}s  {_sc[\'text\'][:50]}...")
-        print(f"    -> {_prompt[:80]}")
-        with torch.inference_mode():
-            _image = pipe(
-                prompt=_prompt,
-                negative_prompt=NEG_PROMPT,
-                width=1280, height=720,
-                num_inference_steps=20,
-                guidance_scale=7.5,
-            ).images[0]
-        _image.save(_img_path)
-        print(f"    saved: {os.path.basename(_img_path)}")
+
+        _text = _sc["text"]
+        _kws  = _kw(_text)
+
+        # Short numbered lines → title card (e.g. "1. Faces Carry More Information Than Names")
+        _is_title = bool(re.match(r"^\\d+[.):]", _text.strip())) and len(_text.split()) <= 10
+
+        if _is_title:
+            _pil = _title_card(_text)
+            _pil.save(_img_path)
+            print(f"  [{_i+1}/{_n}] title card  |  {_text[:60]}")
+        else:
+            _icon_id = _find_icon(_kws)
+            if _icon_id:
+                try:
+                    _png = _icon_png(_icon_id)
+                    _pil = _icon_card(_text, _png)
+                    print(f"  [{_i+1}/{_n}] {_icon_id:<30}  |  {_text[:45]}")
+                except Exception as _e:
+                    print(f"  [{_i+1}/{_n}] icon render error ({_e}) — text fallback")
+                    _pil = _text_card(_text)
+            else:
+                _pil = _text_card(_text)
+                print(f"  [{_i+1}/{_n}] text-only  |  {_text[:50]}")
+            _pil.save(_img_path)
+
     print(f"\\nAll {_n} images done. Run Cell 7.")
 ''')
 
