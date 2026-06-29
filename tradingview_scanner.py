@@ -801,14 +801,12 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     rsi1h  = rsi(c1h)
     rsi4h  = rsi(c4h)
     rsi1d  = rsi(c1d) if c1d else 50
-    mh1h, ml1h = macd_hist(c1h)
-    mh4h, _    = macd_hist(c4h)
+    mh1h, _ = macd_hist(c1h)
+    mh4h, _ = macd_hist(c4h)
 
     ema21_1h  = ema(c1h, 21)
     ema50_1h  = ema(c1h, 50)
     ema200_1h = ema(c1h, min(200, len(c1h)))
-    ema50_4h  = ema(c4h, 50)
-    ema200_4h = ema(c4h, min(200, len(c4h)))
     ema50_1d  = ema(c1d, min(50, len(c1d))) if c1d else 0
     ema200_1d = ema(c1d, min(200, len(c1d))) if c1d else 0
 
@@ -1416,7 +1414,8 @@ def build_message(s):
 
     score_bar = "#" * round(s["score"] / 10) + "-" * (10 - round(s["score"] / 10))
     dir_label = "LONG" if s["direction"] == "LONG" else "SHORT"
-    dir_arrow = "LONG" if s["direction"] == "LONG" else "SHORT"
+    sl_sign   = "-" if s["direction"] == "LONG" else "+"
+    tp_sign   = "+" if s["direction"] == "LONG" else "-"
 
     fg_label = (
         "Extreme Fear" if s["fear_greed"] < 25 else
@@ -1456,10 +1455,10 @@ def build_message(s):
         "=== TRADE SETUP ===\n"
         "Direction:  %s\n"
         "Entry:      $%s\n"
-        "Stop Loss:  $%s  (-%.2f%%)\n"
-        "TP1:        $%s  (+%.2f%%)  [take 40%%]\n"
-        "TP2:        $%s  (+%.2f%%)  [take 35%%]\n"
-        "TP3:        $%s  (+%.2f%%)  [let 25%% run]\n"
+        "Stop Loss:  $%s  (%s%.2f%%)\n"
+        "TP1:        $%s  (%s%.2f%%)  [take 40%%]\n"
+        "TP2:        $%s  (%s%.2f%%)  [take 35%%]\n"
+        "TP3:        $%s  (%s%.2f%%)  [let 25%% run]\n"
         "R/R Ratio:  %.2fx\n"
         "\n"
         "=== LEVERAGE & POSITION SIZING ===\n"
@@ -1512,7 +1511,7 @@ def build_message(s):
         "Source: TradingView + Bybit + Binance + OKX\n"
         "Not financial advice - DYOR!"
     ) % (
-        tier_icon, dir_arrow,
+        tier_icon, dir_label,
         s["symbol"].replace("USDT", ""), s["score"],
         s["tier"],
         score_bar,
@@ -1520,10 +1519,10 @@ def build_message(s):
         s["tv_ma"], s["tv_osc"],
         dir_label,
         fp(s["entry"]),
-        fp(s["sl"]),   sl_pct,
-        fp(s["tp1"]),  tp1_pct,
-        fp(s["tp2"]),  tp2_pct,
-        fp(s["tp3"]),  tp3_pct,
+        fp(s["sl"]),   sl_sign, sl_pct,
+        fp(s["tp1"]),  tp_sign, tp1_pct,
+        fp(s["tp2"]),  tp_sign, tp2_pct,
+        fp(s["tp3"]),  tp_sign, tp3_pct,
         s["rr"],
         s["leverage"],
         s["leverage_max"], s["atr_pct"],
@@ -1567,8 +1566,10 @@ def build_message_forex(s):
     }.get(s["tier"], "[?]")
 
     score_bar = "#" * round(s["score"] / 10) + "-" * (10 - round(s["score"] / 10))
-    dir_label    = "LONG" if s["direction"] == "LONG" else "SHORT"
-    asset_class  = s.get("asset_class", "FOREX").upper()
+    dir_label   = "LONG" if s["direction"] == "LONG" else "SHORT"
+    asset_class = s.get("asset_class", "FOREX").upper()
+    sl_sign     = "-" if s["direction"] == "LONG" else "+"
+    tp_sign     = "+" if s["direction"] == "LONG" else "-"
 
     fg_label = (
         "Extreme Fear" if s["fear_greed"] < 25 else
@@ -1598,10 +1599,10 @@ def build_message_forex(s):
         "=== TRADE SETUP ===\n"
         "Direction:  %s\n"
         "Entry:      %s\n"
-        "Stop Loss:  %s  (-%.2f%%)\n"
-        "TP1:        %s  (+%.2f%%)  [take 40%%]\n"
-        "TP2:        %s  (+%.2f%%)  [take 35%%]\n"
-        "TP3:        %s  (+%.2f%%)  [let 25%% run]\n"
+        "Stop Loss:  %s  (%s%.2f%%)\n"
+        "TP1:        %s  (%s%.2f%%)  [take 40%%]\n"
+        "TP2:        %s  (%s%.2f%%)  [take 35%%]\n"
+        "TP3:        %s  (%s%.2f%%)  [let 25%% run]\n"
         "R/R Ratio:  %.2fx\n"
         "\n"
         "=== TECHNICAL CONFIRMATION ===\n"
@@ -1637,10 +1638,10 @@ def build_message_forex(s):
         s["tv_ma"], s["tv_osc"],
         dir_label,
         fp(s["entry"]),
-        fp(s["sl"]),   sl_pct,
-        fp(s["tp1"]),  tp1_pct,
-        fp(s["tp2"]),  tp2_pct,
-        fp(s["tp3"]),  tp3_pct,
+        fp(s["sl"]),   sl_sign, sl_pct,
+        fp(s["tp1"]),  tp_sign, tp1_pct,
+        fp(s["tp2"]),  tp_sign, tp2_pct,
+        fp(s["tp3"]),  tp_sign, tp3_pct,
         s["rr"],
         s["rsi"],
         s["adx"],
