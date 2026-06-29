@@ -1102,20 +1102,11 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
         else:
             entry = price
 
-        sl  = entry - atr_val * 1.8
-        if supports:
-            structural_sl = supports[0] * 0.997
-            sl = max(sl, structural_sl) if structural_sl > sl else sl
-            if sl >= entry: sl = entry - atr_val * 1.8
-
+        # SL always ATR-based — structural override caused SL/R/R mismatch
+        sl  = entry - atr_val * 1.8          # risk  = 1.8x ATR
         tp1 = entry + atr_val * 1.5
-        tp2 = entry + atr_val * 3.0
-        tp3 = entry + atr_val * 5.0
-        if resistances:
-            for res in resistances:
-                if tp1 < res <= tp2 * 1.05:
-                    tp2 = res * 0.998
-                    break
+        tp2 = entry + atr_val * 4.0          # R/R   = 4.0/1.8 = 2.22
+        tp3 = entry + atr_val * 6.5
     else:
         if resistances and abs(price - resistances[0]) / price <= 0.015:
             entry = resistances[0] * 0.999
@@ -1123,19 +1114,9 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
             entry = price
 
         sl  = entry + atr_val * 1.8
-        if resistances:
-            structural_sl = resistances[0] * 1.003
-            sl = min(sl, structural_sl) if structural_sl < sl else sl
-            if sl <= entry: sl = entry + atr_val * 1.8
-
         tp1 = entry - atr_val * 1.5
-        tp2 = entry - atr_val * 3.0
-        tp3 = entry - atr_val * 5.0
-        if supports:
-            for sup in supports:
-                if tp1 > sup >= tp2 * 0.95:
-                    tp2 = sup * 1.002
-                    break
+        tp2 = entry - atr_val * 4.0
+        tp3 = entry - atr_val * 6.5
 
     risk   = abs(entry - sl)
     reward = abs(tp2 - entry)
