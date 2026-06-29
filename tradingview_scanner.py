@@ -1,6 +1,5 @@
 import os
 import time
-import math
 import logging
 import requests
 import asyncio
@@ -1336,8 +1335,11 @@ def score_setup_tv_only(tv, market):
     elif cci_val > 100:
         short_score += 5; short_reasons.append("CCI overbought (%.0f)" % cci_val)
 
-    # ── Normalise to 100 (max raw = 130) ────────────────────────────────────
-    max_pts = 130
+    # ── Normalise to 100 ────────────────────────────────────────────────────
+    # 115 = realistic max for a strong TV-only signal (STRONG BUY + MA + OSC +
+    # MACD + EMA stack + ADX + momentum = ~92 raw → 80%). Full 130 would push
+    # even strong signals below the 72% threshold.
+    max_pts = 115
     long_pct  = min(int(long_score  / max_pts * 100), 100)
     short_pct = min(int(short_score / max_pts * 100), 100)
 
@@ -1352,19 +1354,19 @@ def score_setup_tv_only(tv, market):
     else:
         return None
 
-    # ATR-based levels
+    # ATR-based levels  (sl=1.5×ATR → tp2=3.0×ATR gives R/R=2.0 exactly, passes MIN_RR=2.0)
     if direction == "LONG":
         entry = price
         sl    = entry - atr_val * 1.5
         tp1   = entry + atr_val * 1.2
-        tp2   = entry + atr_val * 2.5
-        tp3   = entry + atr_val * 4.0
+        tp2   = entry + atr_val * 3.0
+        tp3   = entry + atr_val * 4.5
     else:
         entry = price
         sl    = entry + atr_val * 1.5
         tp1   = entry - atr_val * 1.2
-        tp2   = entry - atr_val * 2.5
-        tp3   = entry - atr_val * 4.0
+        tp2   = entry - atr_val * 3.0
+        tp3   = entry - atr_val * 4.5
 
     risk   = abs(entry - sl)
     reward = abs(tp2 - entry)
@@ -1764,7 +1766,7 @@ async def main():
                 try:
                     # ── Primary data (Bybit) ─────────────────────────────────
                     k1h      = fetch_klines(symbol, "1h",  200); time.sleep(0.15)
-                    k4h      = fetch_klines(symbol, "4h",  150); time.sleep(0.15)
+                    k4h      = fetch_klines(symbol, "4h",  250); time.sleep(0.15)
                     k1d      = fetch_klines(symbol, "1d",  250); time.sleep(0.15)
                     funding  = fetch_funding_rate(symbol);       time.sleep(0.10)
                     oi_chg   = fetch_oi_change(symbol);          time.sleep(0.10)
