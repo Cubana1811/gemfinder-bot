@@ -1280,6 +1280,10 @@ async def main():
 
     bot = Bot(token=TELEGRAM_TOKEN)
 
+    # Clear any registered webhook — getUpdates returns 409 if a webhook is active
+    await bot.delete_webhook(drop_pending_updates=True)
+    log.info("Webhook cleared — polling mode active")
+
     restored_note = ""
     if open_positions:
         restored_note = "\nRestored %d open position(s) from disk." % len(open_positions)
