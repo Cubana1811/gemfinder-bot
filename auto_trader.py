@@ -14,7 +14,6 @@ import asyncio
 import requests
 from datetime import datetime, timezone, date
 from telegram import Bot
-from telegram.ext import Application, CommandHandler, ContextTypes
 
 # Import scoring engine from the signal bot (same repo, no duplication)
 from tradingview_scanner import (
@@ -527,22 +526,22 @@ async def monitor_positions(bot: Bot):
 
 # ── Telegram Commands ───────────────────────────────────────────────────────────
 
-async def cmd_stop(update, context: ContextTypes.DEFAULT_TYPE):
+async def _send_cmd_stop(bot: Bot, chat_id):
     global trading_active
     trading_active = False
-    await update.message.reply_text(
-        "[AUTO-TRADER] Trading HALTED.\n"
-        "No new entries. Existing positions managed.\n"
-        "Use /resume to restart.")
+    await bot.send_message(chat_id=chat_id,
+        text="[AUTO-TRADER] Trading HALTED.\n"
+             "No new entries. Existing positions managed.\n"
+             "Use /resume to restart.")
 
-async def cmd_resume(update, context: ContextTypes.DEFAULT_TYPE):
+async def _send_cmd_resume(bot: Bot, chat_id):
     global trading_active
     trading_active = True
-    await update.message.reply_text("[AUTO-TRADER] Trading RESUMED.")
+    await bot.send_message(chat_id=chat_id, text="[AUTO-TRADER] Trading RESUMED.")
 
-async def cmd_status(update, context: ContextTypes.DEFAULT_TYPE):
+async def _send_cmd_status(bot: Bot, chat_id):
     if not open_positions:
-        await update.message.reply_text("[AUTO-TRADER] No open positions.")
+        await bot.send_message(chat_id=chat_id, text="[AUTO-TRADER] No open positions.")
         return
     lines = ["[AUTO-TRADER] Open Positions (%d/%d):\n" % (len(open_positions), MAX_POSITIONS)]
     for sym, pos in open_positions.items():
@@ -560,9 +559,9 @@ async def cmd_status(update, context: ContextTypes.DEFAULT_TYPE):
                    "Yes" if pos.breakeven else "No"))
         else:
             lines.append("%s %s  |  Entry: $%.5g" % (pos["direction"], sym, pos["entry"]))
-    await update.message.reply_text("\n".join(lines))
+    await bot.send_message(chat_id=chat_id, text="\n".join(lines))
 
-async def cmd_balance(update, context: ContextTypes.DEFAULT_TYPE):
+async def _send_cmd_balance(bot: Bot, chat_id):
     bal  = get_balance()
     mode = "PAPER" if PAPER_TRADE else "LIVE"
     gain = bal - PAPER_START_BAL if PAPER_TRADE else 0
@@ -570,12 +569,12 @@ async def cmd_balance(update, context: ContextTypes.DEFAULT_TYPE):
     msg  = "[%s] Balance: $%.2f USDT" % (mode, bal)
     if PAPER_TRADE:
         msg += "\nStarted: $%.2f  |  Change: %s$%.2f" % (PAPER_START_BAL, sign, gain)
-    await update.message.reply_text(msg)
+    await bot.send_message(chat_id=chat_id, text=msg)
 
-async def cmd_performance(update, context: ContextTypes.DEFAULT_TYPE):
+async def _send_cmd_performance(bot: Bot, chat_id):
     t  = total_stats
     wr = (t["wins"] / t["trades"] * 100) if t["trades"] > 0 else 0.0
-    await update.message.reply_text(
+    await bot.send_message(chat_id=chat_id, text=(
         "[AUTO-TRADER] Overall Performance\n"
         "Total Trades: %d\n"
         "Wins: %d  |  Losses: %d\n"
@@ -586,21 +585,21 @@ async def cmd_performance(update, context: ContextTypes.DEFAULT_TYPE):
         "Today P&L: $%.2f"
         % (t["trades"], t["wins"], t["losses"], wr, t["pnl"],
            daily_stats["date"], daily_stats["trades"],
-           daily_stats["wins"], daily_stats["losses"], daily_stats["pnl"]))
+           daily_stats["wins"], daily_stats["losses"], daily_stats["pnl"])))
 
-async def cmd_daily(update, context: ContextTypes.DEFAULT_TYPE):
+async def _send_cmd_daily(bot: Bot, chat_id):
     d  = daily_stats
     wr = (d["wins"] / d["trades"] * 100) if d["trades"] > 0 else 0.0
-    await update.message.reply_text(
+    await bot.send_message(chat_id=chat_id, text=(
         "[AUTO-TRADER] Today — %s\n"
         "Trades: %d\n"
         "Wins: %d  |  Losses: %d\n"
         "Win Rate: %.1f%%\n"
         "P&L: $%.2f"
-        % (d["date"], d["trades"], d["wins"], d["losses"], wr, d["pnl"]))
+        % (d["date"], d["trades"], d["wins"], d["losses"], wr, d["pnl"])))
 
-async def cmd_help(update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+async def _send_cmd_help(bot: Bot, chat_id):
+    await bot.send_message(chat_id=chat_id, text=(
         "[AUTO-TRADER] Commands:\n"
         "/stop        — halt all new entries\n"
         "/resume      — resume trading\n"
@@ -608,7 +607,37 @@ async def cmd_help(update, context: ContextTypes.DEFAULT_TYPE):
         "/balance     — account balance\n"
         "/performance — all-time win rate + P&L\n"
         "/daily       — today's summary\n"
-        "/help        — this message")
+        "/help        — this message"))
+
+async def command_listener(bot: Bot):
+    """Poll Telegram for commands using raw get_updates — no Application framework needed."""
+    offset = 0
+    cmd_map = {
+        "/stop":        _send_cmd_stop,
+        "/resume":      _send_cmd_resume,
+        "/status":      _send_cmd_status,
+        "/balance":     _send_cmd_balance,
+        "/performance": _send_cmd_performance,
+        "/daily":       _send_cmd_daily,
+        "/help":        _send_cmd_help,
+    }
+    while True:
+        try:
+            updates = await bot.get_updates(offset=offset, timeout=10,
+                                            allowed_updates=["message"])
+            for upd in updates:
+                offset = upd.update_id + 1
+                msg = upd.message
+                if not msg or not msg.text:
+                    continue
+                # strip bot username suffix e.g. /stop@MyBot → /stop
+                cmd = msg.text.strip().lower().split("@")[0].split()[0]
+                if cmd in cmd_map:
+                    await cmd_map[cmd](bot, msg.chat_id)
+        except Exception as e:
+            log.error("Command listener error: %s" % e)
+            await asyncio.sleep(5)
+        await asyncio.sleep(1)
 
 # ── Main Scan + Trade Loop ──────────────────────────────────────────────────────
 
@@ -721,46 +750,33 @@ async def main():
     mode = "PAPER TRADING" if PAPER_TRADE else "LIVE TRADING"
     log.info("GemFinder Auto-Trader starting in %s mode" % mode)
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("stop",        cmd_stop))
-    app.add_handler(CommandHandler("resume",      cmd_resume))
-    app.add_handler(CommandHandler("status",      cmd_status))
-    app.add_handler(CommandHandler("balance",     cmd_balance))
-    app.add_handler(CommandHandler("performance", cmd_performance))
-    app.add_handler(CommandHandler("daily",       cmd_daily))
-    app.add_handler(CommandHandler("help",        cmd_help))
+    bot = Bot(token=TELEGRAM_TOKEN)
 
-    async with app:
-        await app.start()
-        await app.updater.start_polling(drop_pending_updates=True)
+    await bot.send_message(chat_id=CHAT_ID, text=(
+        "[AUTO-TRADER] GemFinder Auto-Trader Online!\n\n"
+        "Mode:            %s\n"
+        "Risk/trade:      %.1f%% of account\n"
+        "Max positions:   %d\n"
+        "Daily loss cap:  %.1f%%\n"
+        "Max leverage:    %dx\n"
+        "%s\n\n"
+        "Partial exits:\n"
+        "  TP1 → close 40%%\n"
+        "  TP2 → close 35%%\n"
+        "  TP3 → let 25%% run\n"
+        "  TP1 hit → SL moves to breakeven\n\n"
+        "Commands: /stop /resume /status\n"
+        "/balance /performance /daily /help\n\n"
+        "Scanning every %ds. Watching the market..."
+    ) % (mode, RISK_PCT, MAX_POSITIONS, DAILY_LOSS_LIMIT, MAX_LEVERAGE,
+         "Paper balance: $%.2f" % paper_balance if PAPER_TRADE else "Live Bybit account connected.",
+         SCAN_INTERVAL))
 
-        await app.bot.send_message(chat_id=CHAT_ID, text=(
-            "[AUTO-TRADER] GemFinder Auto-Trader Online!\n\n"
-            "Mode:            %s\n"
-            "Risk/trade:      %.1f%% of account\n"
-            "Max positions:   %d\n"
-            "Daily loss cap:  %.1f%%\n"
-            "Max leverage:    %dx\n"
-            "%s\n\n"
-            "Partial exits:\n"
-            "  TP1 → close 40%%\n"
-            "  TP2 → close 35%%\n"
-            "  TP3 → let 25%% run\n"
-            "  TP1 hit → SL moves to breakeven\n\n"
-            "Commands: /stop /resume /status\n"
-            "/balance /performance /daily /help\n\n"
-            "Scanning every %ds. Watching the market..."
-        ) % (mode, RISK_PCT, MAX_POSITIONS, DAILY_LOSS_LIMIT, MAX_LEVERAGE,
-             "Paper balance: $%.2f" % paper_balance if PAPER_TRADE else "Live Bybit account connected.",
-             SCAN_INTERVAL))
-
-        await asyncio.gather(
-            trading_loop(app.bot),
-            monitor_positions(app.bot),
-        )
-
-        await app.updater.stop()
-        await app.stop()
+    await asyncio.gather(
+        trading_loop(bot),
+        monitor_positions(bot),
+        command_listener(bot),
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
