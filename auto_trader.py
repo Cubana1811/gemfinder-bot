@@ -1,7 +1,15 @@
 """
-GemFinder Auto-Trader — Stage 1
+GemFinder Auto-Trader — Stage 2
 Executes trades on Bybit based on the GemFinder signal scoring engine.
 Paper trading is ON by default. Set PAPER_TRADE=false in Railway to go live.
+
+Stage 2 safety features:
+  - Slippage guard       (skip if price moved >0.5% from signal entry)
+  - Anti-revenge cooldown (30-min pause after any loss)
+  - Correlation filter   (no two positions on the same base coin)
+  - Funding rate filter  (skip if funding >0.1% against direction)
+  - Trailing stop loss   (SL trails peak price after TP1 hit)
+  - Time-based exit      (close stagnant trades after 24h)
 """
 
 import os
@@ -44,6 +52,13 @@ TP1_CLOSE = 0.40   # close 40% at TP1
 TP2_CLOSE = 0.35   # close 35% at TP2
 TP3_CLOSE = 0.25   # let 25% run to TP3
 
+# Stage 2 safety settings
+MAX_HOLD_HOURS   = 24      # close stagnant position after 24h without TP1
+SLIPPAGE_MAX_PCT = 0.5     # skip entry if price moved >0.5% from signal
+REVENGE_COOLDOWN = 1800    # 30-min cool-down after any loss
+TRAIL_STEP_PCT   = 0.5     # trailing SL sits 0.5% behind peak after TP1
+MAX_FUND_RATE    = 0.001   # skip if funding rate >0.1% against direction
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -54,6 +69,7 @@ seen_signals          = {}    # symbol → last signal timestamp (cooldown)
 paper_balance         = float(PAPER_START_BAL)
 daily_stats           = {"date": str(date.today()), "pnl": 0.0, "wins": 0, "losses": 0, "trades": 0}
 total_stats           = {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0}
+last_loss_time        = 0.0   # timestamp of most recent loss (anti-revenge)
 
 # ── Bybit V5 Authenticated API ─────────────────────────────────────────────────
 
@@ -234,10 +250,12 @@ class PaperPosition:
         self.tp2_hit       = False
         self.breakeven     = False
         self.opened_at     = datetime.now(timezone.utc)
+        self.peak_price    = None   # trailing SL tracker (LONG)
+        self.trough_price  = None   # trailing SL tracker (SHORT)
 
     def check(self, price: float) -> str:
         """Returns the event triggered at this price: tp1/tp2/tp3/sl/open."""
-        sl_level = self.entry if self.breakeven else self.sl
+        sl_level = self.sl  # sl is updated to entry on TP1 hit, then trailed
         if self.direction == "LONG":
             if not self.tp1_hit and price >= self.tp1:       return "tp1"
             if self.tp1_hit and not self.tp2_hit and price >= self.tp2: return "tp2"
@@ -266,7 +284,7 @@ def check_reset_daily():
 # ── Trade Execution ─────────────────────────────────────────────────────────────
 
 async def execute_trade(result: dict, bot: Bot) -> bool:
-    global paper_balance, daily_stats, total_stats, trading_active
+    global paper_balance, daily_stats, total_stats, trading_active, last_loss_time
 
     symbol    = result["symbol"]
     direction = result["direction"]
@@ -298,6 +316,41 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
             "Trading paused until tomorrow.\nUse /resume to override." % DAILY_LOSS_LIMIT))
         trading_active = False
         return False
+
+    # Stage 2 — Slippage guard: current price must be close to signal entry
+    current_price = get_current_price(symbol)
+    if current_price and entry:
+        slippage_pct = abs(current_price - entry) / entry * 100
+        if slippage_pct > SLIPPAGE_MAX_PCT:
+            log.info("Slippage guard: %s moved %.2f%% from entry — skipping" % (symbol, slippage_pct))
+            return False
+
+    # Stage 2 — Anti-revenge: 30-min cool-down after any loss
+    cooldown_remaining = REVENGE_COOLDOWN - (time.time() - last_loss_time)
+    if cooldown_remaining > 0:
+        log.info("Revenge cooldown: %dm left — skipping %s" % (int(cooldown_remaining / 60), symbol))
+        return False
+
+    # Stage 2 — Correlation filter: no two positions on the same base coin
+    base = symbol.replace("USDT", "").replace("BUSD", "").replace("USD", "")
+    for open_sym in open_positions:
+        open_base = open_sym.replace("USDT", "").replace("BUSD", "").replace("USD", "")
+        if open_base == base:
+            log.info("Correlation filter: already have %s — skipping %s" % (open_sym, symbol))
+            return False
+
+    # Stage 2 — Funding rate filter: skip if funding strongly against direction
+    try:
+        funding = fetch_funding_rate(symbol)
+        if isinstance(funding, (int, float)):
+            if direction == "LONG" and funding > MAX_FUND_RATE:
+                log.info("Funding filter: %.4f%% vs LONG %s — skipping" % (funding * 100, symbol))
+                return False
+            if direction == "SHORT" and funding < -MAX_FUND_RATE:
+                log.info("Funding filter: %.4f%% vs SHORT %s — skipping" % (funding * 100, symbol))
+                return False
+    except Exception:
+        pass
 
     qty = calc_qty(balance, entry, sl, leverage)
     if qty <= 0:
@@ -396,7 +449,7 @@ async def monitor_positions(bot: Bot):
     Paper mode: poll price every 30s and simulate TP/SL hits.
     Live mode:  check if Bybit still shows the position open.
     """
-    global paper_balance, daily_stats, total_stats
+    global paper_balance, daily_stats, total_stats, last_loss_time
 
     while True:
         await asyncio.sleep(30)
@@ -450,6 +503,7 @@ async def monitor_positions(bot: Bot):
                     pnl        = pos.pnl(pos.tp1, qty_closed)
                     pos.tp1_hit       = True
                     pos.breakeven     = True
+                    pos.sl            = pos.entry   # SL moves to breakeven; trailing improves from here
                     pos.qty_remaining = round(pos.qty_remaining - qty_closed, 3)
                     margin_back       = (qty_closed * pos.entry) / pos.leverage
                     paper_balance    += margin_back + pnl
@@ -460,6 +514,7 @@ async def monitor_positions(bot: Bot):
                         "Price:   $%.5g\n"
                         "Profit:  +$%.2f  (40%% closed)\n"
                         "SL moved to BREAKEVEN ($%.5g)\n"
+                        "Trailing SL now active\n"
                         "35%% + 25%% still running\n"
                         "Balance: $%.2f"
                     ) % (pos.direction, symbol, pos.tp1, pnl, pos.entry, paper_balance))
@@ -499,7 +554,7 @@ async def monitor_positions(bot: Bot):
                     ) % (pos.direction, symbol, pos.tp3, pnl, paper_balance))
 
                 elif event == "sl":
-                    exit_price = pos.entry if pos.breakeven else pos.sl
+                    exit_price = pos.sl   # entry/trailing if TP1 hit, else original SL
                     pnl        = pos.pnl(exit_price, pos.qty_remaining)
                     margin_back       = (pos.qty_remaining * pos.entry) / pos.leverage
                     paper_balance    += margin_back + pnl
@@ -508,11 +563,12 @@ async def monitor_positions(bot: Bot):
                     if pos.breakeven:
                         daily_stats["wins"] += 1
                         total_stats["wins"] += 1
-                        label = "BREAKEVEN EXIT"
+                        label = "BREAKEVEN/TRAIL EXIT"
                     else:
                         daily_stats["losses"] += 1
                         total_stats["losses"] += 1
                         label = "STOPPED OUT"
+                        last_loss_time = time.time()   # start revenge cooldown
                     open_positions.pop(symbol)
                     await bot.send_message(chat_id=CHAT_ID, text=(
                         "[PAPER] %s — %s %s\n"
@@ -520,6 +576,48 @@ async def monitor_positions(bot: Bot):
                         "P&L:     $%.2f\n"
                         "Balance: $%.2f"
                     ) % (label, pos.direction, symbol, exit_price, pnl, paper_balance))
+
+                # Stage 2 — Trailing SL: update after TP1 hit on each 30s poll
+                if symbol in open_positions and pos.tp1_hit and not pos.tp2_hit:
+                    if pos.direction == "LONG":
+                        if pos.peak_price is None or price > pos.peak_price:
+                            pos.peak_price = price
+                            trail_sl = round(price * (1 - TRAIL_STEP_PCT / 100), 8)
+                            if trail_sl > pos.sl:
+                                pos.sl = trail_sl
+                                log.info("Trail SL %s LONG → $%.6g" % (symbol, trail_sl))
+                    else:
+                        if pos.trough_price is None or price < pos.trough_price:
+                            pos.trough_price = price
+                            trail_sl = round(price * (1 + TRAIL_STEP_PCT / 100), 8)
+                            if trail_sl < pos.sl:
+                                pos.sl = trail_sl
+                                log.info("Trail SL %s SHORT → $%.6g" % (symbol, trail_sl))
+
+                # Stage 2 — Time-based exit: close if stagnant >24h without TP1
+                if symbol in open_positions and not pos.tp1_hit:
+                    hours_open = (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 3600
+                    if hours_open > MAX_HOLD_HOURS:
+                        pnl         = pos.pnl(price, pos.qty_remaining)
+                        margin_back = (pos.qty_remaining * pos.entry) / pos.leverage
+                        paper_balance    += margin_back + pnl
+                        daily_stats["pnl"] += pnl
+                        total_stats["pnl"] += pnl
+                        if pnl >= 0:
+                            daily_stats["wins"] += 1
+                            total_stats["wins"] += 1
+                        else:
+                            daily_stats["losses"] += 1
+                            total_stats["losses"] += 1
+                            last_loss_time = time.time()
+                        open_positions.pop(symbol)
+                        await bot.send_message(chat_id=CHAT_ID, text=(
+                            "[PAPER] TIME EXIT (24h) — %s %s\n"
+                            "Never reached TP1. Closed at market.\n"
+                            "Exit:    $%.5g\n"
+                            "P&L:     $%.2f\n"
+                            "Balance: $%.2f"
+                        ) % (pos.direction, symbol, price, pnl, paper_balance))
 
             except Exception as e:
                 log.error("Monitor error for %s: %s" % (symbol, e))
