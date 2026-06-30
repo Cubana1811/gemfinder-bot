@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHAT_ID         = os.environ.get("CHAT_ID", "YOUR_CHAT_ID_HERE")
 SCAN_INTERVAL   = 300        # 5 minutes between scans
-MIN_SCORE       = 72         # minimum confluence score to send
+MIN_SCORE       = 80         # minimum confluence score to send
 MIN_RR          = 2.0        # minimum risk/reward ratio
 SIGNAL_COOLDOWN = 7200       # 2 hours cooldown per symbol
 MAX_SIGNALS     = 3          # max signals per scan cycle
@@ -1074,9 +1074,11 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
         short_score += 3
 
     # ── Normalise to 100 ────────────────────────────────────────────────────────
-    # 180 = realistic max for a strong signal without rare events (BB squeeze /
-    # liquidity sweep). Scores above 180 are capped at 100 by min(..., 100).
-    max_pts = 180
+    # 155 = realistic max for a strong signal without rare events (BB squeeze /
+    # liquidity sweep). Calibrated so a typical strong signal scores ~80% raw,
+    # guaranteeing every sent signal passes the 80% threshold. Scores above 155
+    # are capped at 100 by min(..., 100).
+    max_pts = 155
     long_pct  = min(int(long_score  / max_pts * 100), 100)
     short_pct = min(int(short_score / max_pts * 100), 100)
 
