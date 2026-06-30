@@ -1165,8 +1165,11 @@ async def command_listener(bot: Bot):
         "/help":        _send_cmd_help,
     }
 
-    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
+    # BOT_WEBHOOK_HOST takes priority; falls back to RAILWAY_PUBLIC_DOMAIN
+    domain = (os.environ.get("BOT_WEBHOOK_HOST", "")
+              or os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")).strip()
     port   = int(os.environ.get("PORT", "8080"))
+    log.info("Webhook domain resolved: '%s' (port %d)" % (domain, port))
 
     if domain:
         # ── Webhook mode (Railway) ─────────────────────────────────────────
@@ -1342,9 +1345,9 @@ async def main():
 
     bot = Bot(token=TELEGRAM_TOKEN)
 
-    # Clear any registered webhook — getUpdates returns 409 if a webhook is active
+    # Clear any stale webhook from previous deploys
     await bot.delete_webhook(drop_pending_updates=True)
-    log.info("Webhook cleared — polling mode active")
+    log.info("Stale webhook cleared")
 
     restored_note = ""
     if open_positions:
