@@ -1,5 +1,5 @@
 """
-GemFinder Auto-Trader — Stage 3 (Full Production)
+GemFinder Auto-Trader — Complete Production Build
 Executes trades on Bybit based on the GemFinder signal scoring engine.
 Paper trading is ON by default. Set PAPER_TRADE=false in Railway to go live.
 
@@ -15,8 +15,18 @@ Stage 3 production features:
   - Portfolio heat limit   (max 6% total risk across all open positions)
   - Weekly drawdown pause  (halt if down 15% in 7 days until Monday)
   - Dynamic position sizing (50% size after 2+ consecutive losses)
-  - Weekly performance report (auto Monday + /weekly command)
+  - Weekly/monthly reports (auto Monday/monthly + /weekly /monthly commands)
   - Live API retry         (Bybit POST retried up to 3x on failure)
+
+Complete build additions:
+  - Position persistence   (JSON file — survives restarts, reload on startup)
+  - Stats persistence      (balance, streaks, P&L survive restarts)
+  - News/event blackout    (skip entries during major US economic event windows)
+  - Max drawdown from peak (halt if account drops 20% from all-time high)
+  - Spread/liquidity check (skip if bid/ask spread > 0.1%)
+  - Compound mode          (COMPOUND_MODE=true grows size with balance; false=fixed)
+  - Profit factor          (gross profit / gross loss shown in /performance)
+  - Health heartbeat       (Telegram alive ping every 12 hours)
 """
 
 import os
@@ -71,6 +81,13 @@ PORTFOLIO_HEAT_MAX = 6.0   # max % total risk across all open positions
 WEEKLY_LOSS_LIMIT  = 15.0  # % weekly drawdown that pauses trading until Monday
 LOSS_STREAK_REDUCE = 2     # consecutive losses before cutting position size 50%
 
+# Complete build settings
+DATA_DIR            = os.environ.get("DATA_DIR", "/app/data")
+PEAK_DRAWDOWN_LIMIT = 20.0  # halt if account drops 20% from all-time high
+MAX_SPREAD_PCT      = 0.1   # skip entry if bid/ask spread > 0.1%
+COMPOUND_MODE       = os.environ.get("COMPOUND_MODE", "true").lower() != "false"
+HEARTBEAT_HOURS     = 12    # send alive ping every N hours
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -79,12 +96,17 @@ trading_active        = True
 open_positions        = {}    # symbol → PaperPosition or live dict
 seen_signals          = {}    # symbol → last signal timestamp (cooldown)
 paper_balance         = float(PAPER_START_BAL)
+peak_balance          = float(PAPER_START_BAL)   # all-time high for drawdown guard
 daily_stats           = {"date": str(date.today()), "pnl": 0.0, "wins": 0, "losses": 0, "trades": 0}
-total_stats           = {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0}
+total_stats           = {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0,
+                         "gross_profit": 0.0, "gross_loss": 0.0}
 last_loss_time        = 0.0   # timestamp of most recent loss (anti-revenge)
 consecutive_losses    = 0     # for dynamic position sizing
 weekly_stats          = {}    # reset each Monday
+monthly_stats         = {}    # reset each month
 last_weekly_report    = ""    # ISO week key of last sent report
+last_monthly_report   = ""    # YYYY-MM key of last sent monthly report
+bot_start_time        = datetime.now(timezone.utc)
 
 # ── Bybit V5 Authenticated API ─────────────────────────────────────────────────
 
@@ -314,6 +336,153 @@ def effective_risk_pct() -> float:
         return RISK_PCT * 0.5
     return RISK_PCT
 
+def current_month_key() -> str:
+    d = date.today()
+    return "%d-%02d" % (d.year, d.month)
+
+def check_reset_monthly():
+    global monthly_stats
+    mk = current_month_key()
+    if monthly_stats.get("month") != mk:
+        monthly_stats = {"month": mk, "pnl": 0.0, "wins": 0, "losses": 0, "trades": 0}
+
+def is_news_blackout() -> bool:
+    """
+    Returns True during high-impact US economic event windows (UTC).
+    Avoids entries 5 min before and 15 min after major releases.
+    Windows: 13:25-13:45 (CPI/NFP/retail sales), 18:55-19:15 (FOMC decisions).
+    """
+    now  = datetime.now(timezone.utc)
+    mins = now.hour * 60 + now.minute
+    blackout = [
+        (13 * 60 + 25, 13 * 60 + 45),   # 13:25–13:45 UTC  (CPI, PPI, NFP, retail)
+        (14 * 60 + 55, 15 * 60 + 15),   # 14:55–15:15 UTC  (some Fed speeches)
+        (18 * 60 + 55, 19 * 60 + 15),   # 18:55–19:15 UTC  (FOMC rate decisions)
+    ]
+    return any(start <= mins <= end for start, end in blackout)
+
+def get_spread_pct(symbol: str) -> float:
+    """Return bid/ask spread as % of mid price. 0.0 on failure."""
+    data = bybit_get("/v5/market/orderbook",
+                     {"category": "linear", "symbol": symbol, "limit": "1"})
+    if data.get("retCode") == 0:
+        res  = data["result"]
+        bids = res.get("b", [])
+        asks = res.get("a", [])
+        if bids and asks:
+            bid = float(bids[0][0])
+            ask = float(asks[0][0])
+            mid = (bid + ask) / 2
+            if mid > 0:
+                return (ask - bid) / mid * 100
+    return 0.0
+
+# ── Persistence ────────────────────────────────────────────────────────────────
+
+def _ensure_data_dir():
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+def save_positions():
+    _ensure_data_dir()
+    rows = []
+    for sym, pos in open_positions.items():
+        if isinstance(pos, PaperPosition):
+            rows.append({
+                "type": "paper", "symbol": sym,
+                "direction": pos.direction, "entry": pos.entry,
+                "sl": pos.sl, "tp1": pos.tp1, "tp2": pos.tp2, "tp3": pos.tp3,
+                "qty": pos.qty, "qty_remaining": pos.qty_remaining,
+                "leverage": pos.leverage, "tp1_hit": pos.tp1_hit,
+                "tp2_hit": pos.tp2_hit, "breakeven": pos.breakeven,
+                "risk_pct_used": getattr(pos, "risk_pct_used", RISK_PCT),
+                "peak_price": pos.peak_price, "trough_price": pos.trough_price,
+                "opened_at": pos.opened_at.isoformat(),
+            })
+        else:
+            row = {"type": "live", "symbol": sym}
+            row.update({k: (v.isoformat() if isinstance(v, datetime) else v)
+                        for k, v in pos.items()})
+            rows.append(row)
+    try:
+        with open(os.path.join(DATA_DIR, "positions.json"), "w") as f:
+            json.dump(rows, f)
+    except Exception as e:
+        log.error("save_positions error: %s" % e)
+
+def load_positions():
+    global open_positions
+    path = os.path.join(DATA_DIR, "positions.json")
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path) as f:
+            rows = json.load(f)
+        for r in rows:
+            sym = r["symbol"]
+            if r["type"] == "paper":
+                pos = PaperPosition(sym, r["direction"], r["entry"], r["sl"],
+                                    r["tp1"], r["tp2"], r["tp3"], r["qty"], r["leverage"])
+                pos.qty_remaining  = r["qty_remaining"]
+                pos.tp1_hit        = r["tp1_hit"]
+                pos.tp2_hit        = r["tp2_hit"]
+                pos.breakeven      = r["breakeven"]
+                pos.risk_pct_used  = r.get("risk_pct_used", RISK_PCT)
+                pos.peak_price     = r.get("peak_price")
+                pos.trough_price   = r.get("trough_price")
+                pos.opened_at      = datetime.fromisoformat(r["opened_at"])
+                open_positions[sym] = pos
+            else:
+                d = {k: v for k, v in r.items() if k not in ("type", "symbol")}
+                if "opened_at" in d:
+                    d["opened_at"] = datetime.fromisoformat(d["opened_at"])
+                open_positions[sym] = d
+        log.info("Restored %d position(s) from disk" % len(open_positions))
+    except Exception as e:
+        log.error("load_positions error: %s" % e)
+
+def save_stats():
+    _ensure_data_dir()
+    try:
+        with open(os.path.join(DATA_DIR, "stats.json"), "w") as f:
+            json.dump({
+                "paper_balance":     paper_balance,
+                "peak_balance":      peak_balance,
+                "daily_stats":       daily_stats,
+                "total_stats":       total_stats,
+                "weekly_stats":      weekly_stats,
+                "monthly_stats":     monthly_stats,
+                "consecutive_losses": consecutive_losses,
+                "last_loss_time":    last_loss_time,
+                "last_weekly_report": last_weekly_report,
+                "last_monthly_report": last_monthly_report,
+            }, f)
+    except Exception as e:
+        log.error("save_stats error: %s" % e)
+
+def load_stats():
+    global paper_balance, peak_balance, daily_stats, total_stats
+    global weekly_stats, monthly_stats, consecutive_losses, last_loss_time
+    global last_weekly_report, last_monthly_report
+    path = os.path.join(DATA_DIR, "stats.json")
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        paper_balance        = d.get("paper_balance",      paper_balance)
+        peak_balance         = d.get("peak_balance",       peak_balance)
+        daily_stats          = d.get("daily_stats",        daily_stats)
+        total_stats          = d.get("total_stats",        total_stats)
+        weekly_stats         = d.get("weekly_stats",       weekly_stats)
+        monthly_stats        = d.get("monthly_stats",      monthly_stats)
+        consecutive_losses   = d.get("consecutive_losses", 0)
+        last_loss_time       = d.get("last_loss_time",     0.0)
+        last_weekly_report   = d.get("last_weekly_report", "")
+        last_monthly_report  = d.get("last_monthly_report", "")
+        log.info("Stats restored from disk")
+    except Exception as e:
+        log.error("load_stats error: %s" % e)
+
 # ── Bybit Retry Wrapper ────────────────────────────────────────────────────────
 
 def bybit_post_retry(endpoint: str, payload: dict, retries: int = 3) -> dict:
@@ -330,7 +499,7 @@ def bybit_post_retry(endpoint: str, payload: dict, retries: int = 3) -> dict:
 # ── Trade Execution ─────────────────────────────────────────────────────────────
 
 async def execute_trade(result: dict, bot: Bot) -> bool:
-    global paper_balance, daily_stats, total_stats, trading_active, last_loss_time, consecutive_losses
+    global paper_balance, peak_balance, daily_stats, total_stats, trading_active, last_loss_time, consecutive_losses
 
     symbol    = result["symbol"]
     direction = result["direction"]
@@ -347,6 +516,7 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
     # ── Pre-trade safety checks ────────────────────────────────────────────────
     check_reset_daily()
     check_reset_weekly()
+    check_reset_monthly()
 
     if not trading_active:
         return False
@@ -361,6 +531,20 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
         await bot.send_message(chat_id=CHAT_ID, text=(
             "[AUTO-TRADER] Daily loss limit hit (%.1f%%).\n"
             "Trading paused until tomorrow.\nUse /resume to override." % DAILY_LOSS_LIMIT))
+        trading_active = False
+        return False
+
+    # Complete — News/event blackout window
+    if is_news_blackout():
+        log.info("News blackout active — skipping %s" % symbol)
+        return False
+
+    # Complete — Max drawdown from peak
+    if peak_balance > 0 and (peak_balance - balance) / peak_balance * 100 >= PEAK_DRAWDOWN_LIMIT:
+        await bot.send_message(chat_id=CHAT_ID, text=(
+            "[AUTO-TRADER] Peak drawdown limit hit (%.1f%% from $%.2f).\n"
+            "Trading paused to protect capital.\nUse /resume to override."
+            % (PEAK_DRAWDOWN_LIMIT, peak_balance)))
         trading_active = False
         return False
 
@@ -421,7 +605,19 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
     except Exception:
         pass
 
-    qty = calc_qty(balance, entry, sl, leverage, eff_risk)
+    # Complete — Spread/liquidity check
+    try:
+        spread = get_spread_pct(symbol)
+        if spread > MAX_SPREAD_PCT:
+            log.info("Spread guard: %s spread=%.3f%% > %.1f%% — skipping" % (
+                symbol, spread, MAX_SPREAD_PCT))
+            return False
+    except Exception:
+        pass
+
+    # Complete — Compound mode: use current balance or fixed starting balance
+    sizing_balance = balance if COMPOUND_MODE else float(PAPER_START_BAL)
+    qty = calc_qty(sizing_balance, entry, sl, leverage, eff_risk)
     if qty <= 0:
         return False
 
@@ -452,6 +648,8 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
              margin_used, paper_balance))
 
         log.info("PAPER: %s %s qty=%.3f entry=%.5g sl=%.5g" % (direction, symbol, qty, entry, sl))
+        save_positions()
+        save_stats()
         return True
 
     # ── Live Trade ─────────────────────────────────────────────────────────────
@@ -515,6 +713,8 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
          fill_price, sl, tp1, tp2, tp3, qty, leverage))
 
     log.info("LIVE: %s %s qty=%.3f fill=%.5g" % (direction, symbol, qty, fill_price))
+    save_positions()
+    save_stats()
     return True
 
 # ── Position Monitor ────────────────────────────────────────────────────────────
@@ -524,7 +724,7 @@ async def monitor_positions(bot: Bot):
     Paper mode: poll price every 30s and simulate TP/SL hits.
     Live mode:  check if Bybit still shows the position open.
     """
-    global paper_balance, daily_stats, total_stats, last_loss_time, consecutive_losses, weekly_stats
+    global paper_balance, peak_balance, daily_stats, total_stats, last_loss_time, consecutive_losses, weekly_stats, monthly_stats, last_monthly_report
 
     while True:
         await asyncio.sleep(30)
@@ -616,15 +816,23 @@ async def monitor_positions(bot: Bot):
                     pnl        = pos.pnl(pos.tp3, qty_closed)
                     margin_back       = (qty_closed * pos.entry) / pos.leverage
                     paper_balance    += margin_back + pnl
+                    if paper_balance > peak_balance:
+                        peak_balance = paper_balance
                     daily_stats["pnl"]    += pnl
                     daily_stats["wins"]   += 1
                     total_stats["pnl"]    += pnl
                     total_stats["wins"]   += 1
-                    weekly_stats["pnl"]   = weekly_stats.get("pnl", 0) + pnl
-                    weekly_stats["wins"]  = weekly_stats.get("wins", 0) + 1
+                    total_stats["gross_profit"] = total_stats.get("gross_profit", 0.0) + max(pnl, 0)
+                    weekly_stats["pnl"]    = weekly_stats.get("pnl", 0) + pnl
+                    weekly_stats["wins"]   = weekly_stats.get("wins", 0) + 1
                     weekly_stats["trades"] = weekly_stats.get("trades", 0) + 1
+                    monthly_stats["pnl"]    = monthly_stats.get("pnl", 0) + pnl
+                    monthly_stats["wins"]   = monthly_stats.get("wins", 0) + 1
+                    monthly_stats["trades"] = monthly_stats.get("trades", 0) + 1
                     consecutive_losses    = 0   # win resets streak
                     open_positions.pop(symbol)
+                    save_positions()
+                    save_stats()
                     size_note = "  Size was reduced (loss streak)" if consecutive_losses >= LOSS_STREAK_REDUCE else ""
                     await bot.send_message(chat_id=CHAT_ID, text=(
                         "[PAPER] FULL WIN — %s %s\n"
@@ -638,26 +846,36 @@ async def monitor_positions(bot: Bot):
                     pnl        = pos.pnl(exit_price, pos.qty_remaining)
                     margin_back       = (pos.qty_remaining * pos.entry) / pos.leverage
                     paper_balance    += margin_back + pnl
-                    daily_stats["pnl"] += pnl
-                    total_stats["pnl"] += pnl
-                    weekly_stats["pnl"] = weekly_stats.get("pnl", 0) + pnl
-                    weekly_stats["trades"] = weekly_stats.get("trades", 0) + 1
+                    if paper_balance > peak_balance:
+                        peak_balance = paper_balance
+                    daily_stats["pnl"]      += pnl
+                    total_stats["pnl"]      += pnl
+                    weekly_stats["pnl"]      = weekly_stats.get("pnl", 0) + pnl
+                    weekly_stats["trades"]   = weekly_stats.get("trades", 0) + 1
+                    monthly_stats["pnl"]     = monthly_stats.get("pnl", 0) + pnl
+                    monthly_stats["trades"]  = monthly_stats.get("trades", 0) + 1
                     if pos.breakeven:
-                        daily_stats["wins"] += 1
-                        total_stats["wins"] += 1
-                        weekly_stats["wins"] = weekly_stats.get("wins", 0) + 1
-                        consecutive_losses = 0
+                        daily_stats["wins"]  += 1
+                        total_stats["wins"]  += 1
+                        total_stats["gross_profit"] = total_stats.get("gross_profit", 0.0) + max(pnl, 0)
+                        weekly_stats["wins"]  = weekly_stats.get("wins", 0) + 1
+                        monthly_stats["wins"] = monthly_stats.get("wins", 0) + 1
+                        consecutive_losses   = 0
                         label = "BREAKEVEN/TRAIL EXIT"
                     else:
-                        daily_stats["losses"] += 1
-                        total_stats["losses"] += 1
-                        weekly_stats["losses"] = weekly_stats.get("losses", 0) + 1
+                        daily_stats["losses"]  += 1
+                        total_stats["losses"]  += 1
+                        total_stats["gross_loss"] = total_stats.get("gross_loss", 0.0) + abs(min(pnl, 0))
+                        weekly_stats["losses"]  = weekly_stats.get("losses", 0) + 1
+                        monthly_stats["losses"] = monthly_stats.get("losses", 0) + 1
                         consecutive_losses += 1
                         last_loss_time = time.time()
                         label = "STOPPED OUT"
                         if consecutive_losses >= LOSS_STREAK_REDUCE:
                             label += " (size halved next trade)"
                     open_positions.pop(symbol)
+                    save_positions()
+                    save_stats()
                     await bot.send_message(chat_id=CHAT_ID, text=(
                         "[PAPER] %s — %s %s\n"
                         "Exit:    $%.5g\n"
@@ -689,22 +907,32 @@ async def monitor_positions(bot: Bot):
                         pnl         = pos.pnl(price, pos.qty_remaining)
                         margin_back = (pos.qty_remaining * pos.entry) / pos.leverage
                         paper_balance    += margin_back + pnl
-                        daily_stats["pnl"] += pnl
-                        total_stats["pnl"] += pnl
-                        weekly_stats["pnl"] = weekly_stats.get("pnl", 0) + pnl
-                        weekly_stats["trades"] = weekly_stats.get("trades", 0) + 1
+                        if paper_balance > peak_balance:
+                            peak_balance = paper_balance
+                        daily_stats["pnl"]      += pnl
+                        total_stats["pnl"]      += pnl
+                        weekly_stats["pnl"]      = weekly_stats.get("pnl", 0) + pnl
+                        weekly_stats["trades"]   = weekly_stats.get("trades", 0) + 1
+                        monthly_stats["pnl"]     = monthly_stats.get("pnl", 0) + pnl
+                        monthly_stats["trades"]  = monthly_stats.get("trades", 0) + 1
                         if pnl >= 0:
-                            daily_stats["wins"] += 1
-                            total_stats["wins"] += 1
-                            weekly_stats["wins"] = weekly_stats.get("wins", 0) + 1
+                            daily_stats["wins"]  += 1
+                            total_stats["wins"]  += 1
+                            total_stats["gross_profit"] = total_stats.get("gross_profit", 0.0) + pnl
+                            weekly_stats["wins"]  = weekly_stats.get("wins", 0) + 1
+                            monthly_stats["wins"] = monthly_stats.get("wins", 0) + 1
                             consecutive_losses = 0
                         else:
-                            daily_stats["losses"] += 1
-                            total_stats["losses"] += 1
-                            weekly_stats["losses"] = weekly_stats.get("losses", 0) + 1
+                            daily_stats["losses"]  += 1
+                            total_stats["losses"]  += 1
+                            total_stats["gross_loss"] = total_stats.get("gross_loss", 0.0) + abs(pnl)
+                            weekly_stats["losses"]  = weekly_stats.get("losses", 0) + 1
+                            monthly_stats["losses"] = monthly_stats.get("losses", 0) + 1
                             consecutive_losses += 1
                             last_loss_time = time.time()
                         open_positions.pop(symbol)
+                        save_positions()
+                        save_stats()
                         await bot.send_message(chat_id=CHAT_ID, text=(
                             "[PAPER] TIME EXIT (24h) — %s %s\n"
                             "Never reached TP1. Closed at market.\n"
@@ -758,24 +986,34 @@ async def _send_cmd_balance(bot: Bot, chat_id):
     mode = "PAPER" if PAPER_TRADE else "LIVE"
     gain = bal - PAPER_START_BAL if PAPER_TRADE else 0
     sign = "+" if gain >= 0 else ""
+    dd   = (peak_balance - bal) / peak_balance * 100 if peak_balance > 0 else 0.0
     msg  = "[%s] Balance: $%.2f USDT" % (mode, bal)
     if PAPER_TRADE:
-        msg += "\nStarted: $%.2f  |  Change: %s$%.2f" % (PAPER_START_BAL, sign, gain)
+        msg += "\nStarted:  $%.2f  |  Change: %s$%.2f" % (PAPER_START_BAL, sign, gain)
+    msg += "\nPeak:     $%.2f  |  Drawdown: %.1f%%" % (peak_balance, dd)
     await bot.send_message(chat_id=chat_id, text=msg)
 
 async def _send_cmd_performance(bot: Bot, chat_id):
     t  = total_stats
     wr = (t["wins"] / t["trades"] * 100) if t["trades"] > 0 else 0.0
+    gp = t.get("gross_profit", 0.0)
+    gl = t.get("gross_loss",   0.0)
+    pf = (gp / gl) if gl > 0 else float("inf")
+    pf_str = "%.2f" % pf if pf != float("inf") else "∞"
     await bot.send_message(chat_id=chat_id, text=(
         "[AUTO-TRADER] Overall Performance\n"
         "Total Trades: %d\n"
         "Wins: %d  |  Losses: %d\n"
-        "Win Rate:  %.1f%%\n"
-        "Total P&L: $%.2f\n\n"
+        "Win Rate:     %.1f%%\n"
+        "Total P&L:    $%.2f\n"
+        "Gross Profit: $%.2f\n"
+        "Gross Loss:   $%.2f\n"
+        "Profit Factor: %s\n\n"
         "Today (%s)\n"
         "Trades: %d  |  Wins: %d  |  Losses: %d\n"
         "Today P&L: $%.2f"
         % (t["trades"], t["wins"], t["losses"], wr, t["pnl"],
+           gp, gl, pf_str,
            daily_stats["date"], daily_stats["trades"],
            daily_stats["wins"], daily_stats["losses"], daily_stats["pnl"])))
 
@@ -790,16 +1028,31 @@ async def _send_cmd_daily(bot: Bot, chat_id):
         "P&L: $%.2f"
         % (d["date"], d["trades"], d["wins"], d["losses"], wr, d["pnl"])))
 
+async def _send_cmd_monthly(bot: Bot, chat_id):
+    check_reset_monthly()
+    m  = monthly_stats
+    tr = m.get("trades", 0)
+    wr = (m.get("wins", 0) / tr * 100) if tr > 0 else 0.0
+    await bot.send_message(chat_id=chat_id, text=(
+        "[AUTO-TRADER] This Month — %s\n"
+        "Trades: %d\n"
+        "Wins: %d  |  Losses: %d\n"
+        "Win Rate: %.1f%%\n"
+        "Monthly P&L: $%.2f"
+    ) % (m.get("month", "—"), tr, m.get("wins", 0), m.get("losses", 0), wr,
+         m.get("pnl", 0.0)))
+
 async def _send_cmd_help(bot: Bot, chat_id):
     await bot.send_message(chat_id=chat_id, text=(
         "[AUTO-TRADER] Commands:\n"
         "/stop        — halt all new entries\n"
         "/resume      — resume trading\n"
         "/status      — open positions + live P&L\n"
-        "/balance     — account balance\n"
-        "/performance — all-time win rate + P&L\n"
+        "/balance     — account balance + drawdown\n"
+        "/performance — all-time win rate + profit factor\n"
         "/daily       — today's summary\n"
         "/weekly      — this week's summary\n"
+        "/monthly     — this month's summary\n"
         "/help        — this message"))
 
 async def _send_cmd_weekly(bot: Bot, chat_id):
@@ -831,9 +1084,49 @@ async def weekly_reporter(bot: Bot):
                     check_reset_weekly()
                     await _send_cmd_weekly(bot, CHAT_ID)
                     last_weekly_report = wk
+                    save_stats()
                     log.info("Weekly report sent for %s" % wk)
         except Exception as e:
             log.error("Weekly reporter error: %s" % e)
+
+async def monthly_reporter(bot: Bot):
+    """Auto-send monthly report on 1st of each month at 00:00–02:00 UTC."""
+    global last_monthly_report
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            now = datetime.now(timezone.utc)
+            if now.day == 1 and now.hour < 2:
+                mk = current_month_key()
+                if last_monthly_report != mk:
+                    await _send_cmd_monthly(bot, CHAT_ID)
+                    last_monthly_report = mk
+                    save_stats()
+                    log.info("Monthly report sent for %s" % mk)
+        except Exception as e:
+            log.error("Monthly reporter error: %s" % e)
+
+async def heartbeat(bot: Bot):
+    """Send an alive ping every HEARTBEAT_HOURS hours."""
+    while True:
+        await asyncio.sleep(HEARTBEAT_HOURS * 3600)
+        try:
+            bal    = get_balance()
+            mode   = "PAPER" if PAPER_TRADE else "LIVE"
+            uptime = datetime.now(timezone.utc) - bot_start_time
+            hours  = int(uptime.total_seconds() // 3600)
+            await bot.send_message(chat_id=CHAT_ID, text=(
+                "[AUTO-TRADER] Heartbeat — still running\n"
+                "Mode:      %s\n"
+                "Balance:   $%.2f\n"
+                "Uptime:    %dh\n"
+                "Positions: %d/%d\n"
+                "Trading:   %s"
+            ) % (mode, bal, hours, len(open_positions), MAX_POSITIONS,
+                 "Active" if trading_active else "PAUSED"))
+            log.info("Heartbeat sent — uptime %dh, balance $%.2f" % (hours, bal))
+        except Exception as e:
+            log.error("Heartbeat error: %s" % e)
 
 async def command_listener(bot: Bot):
     """Poll Telegram for commands using raw get_updates — no Application framework needed."""
@@ -846,6 +1139,7 @@ async def command_listener(bot: Bot):
         "/performance": _send_cmd_performance,
         "/daily":       _send_cmd_daily,
         "/weekly":      _send_cmd_weekly,
+        "/monthly":     _send_cmd_monthly,
         "/help":        _send_cmd_help,
     }
     while True:
@@ -974,10 +1268,21 @@ async def trading_loop(bot: Bot):
 # ── Entry Point ─────────────────────────────────────────────────────────────────
 
 async def main():
+    global paper_balance, peak_balance
     mode = "PAPER TRADING" if PAPER_TRADE else "LIVE TRADING"
     log.info("GemFinder Auto-Trader starting in %s mode" % mode)
 
+    # Restore persisted state from previous run
+    load_stats()
+    load_positions()
+    log.info("Startup — balance=$%.2f  peak=$%.2f  positions=%d" % (
+        paper_balance, peak_balance, len(open_positions)))
+
     bot = Bot(token=TELEGRAM_TOKEN)
+
+    restored_note = ""
+    if open_positions:
+        restored_note = "\nRestored %d open position(s) from disk." % len(open_positions)
 
     await bot.send_message(chat_id=CHAT_ID, text=(
         "[AUTO-TRADER] GemFinder Auto-Trader Online!\n\n"
@@ -986,24 +1291,31 @@ async def main():
         "Max positions:   %d\n"
         "Daily loss cap:  %.1f%%\n"
         "Max leverage:    %dx\n"
-        "%s\n\n"
+        "Compound mode:   %s\n"
+        "%s%s\n\n"
         "Partial exits:\n"
         "  TP1 → close 40%%\n"
         "  TP2 → close 35%%\n"
         "  TP3 → let 25%% run\n"
-        "  TP1 hit → SL moves to breakeven\n\n"
-        "Commands: /stop /resume /status\n"
-        "/balance /performance /daily /weekly /help\n\n"
-        "Scanning every %ds. Watching the market..."
+        "  TP1 hit → SL moves to breakeven + trailing SL\n\n"
+        "Safety: news blackout | spread guard | funding filter\n"
+        "        peak drawdown limit | portfolio heat cap\n\n"
+        "Commands: /stop /resume /status /balance\n"
+        "/performance /daily /weekly /monthly /help\n\n"
+        "Heartbeat every %dh. Scanning every %ds..."
     ) % (mode, RISK_PCT, MAX_POSITIONS, DAILY_LOSS_LIMIT, MAX_LEVERAGE,
-         "Paper balance: $%.2f" % paper_balance if PAPER_TRADE else "Live Bybit account connected.",
-         SCAN_INTERVAL))
+         "ON" if COMPOUND_MODE else "OFF",
+         "Paper balance: $%.2f  |  Peak: $%.2f" % (paper_balance, peak_balance)
+             if PAPER_TRADE else "Live Bybit account connected.",
+         restored_note, HEARTBEAT_HOURS, SCAN_INTERVAL))
 
     await asyncio.gather(
         trading_loop(bot),
         monitor_positions(bot),
         command_listener(bot),
         weekly_reporter(bot),
+        monthly_reporter(bot),
+        heartbeat(bot),
     )
 
 if __name__ == "__main__":
