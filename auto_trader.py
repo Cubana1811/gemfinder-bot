@@ -1,15 +1,22 @@
 """
-GemFinder Auto-Trader — Stage 2
+GemFinder Auto-Trader — Stage 3 (Full Production)
 Executes trades on Bybit based on the GemFinder signal scoring engine.
 Paper trading is ON by default. Set PAPER_TRADE=false in Railway to go live.
 
 Stage 2 safety features:
-  - Slippage guard       (skip if price moved >0.5% from signal entry)
-  - Anti-revenge cooldown (30-min pause after any loss)
-  - Correlation filter   (no two positions on the same base coin)
-  - Funding rate filter  (skip if funding >0.1% against direction)
-  - Trailing stop loss   (SL trails peak price after TP1 hit)
-  - Time-based exit      (close stagnant trades after 24h)
+  - Slippage guard         (skip if price moved >0.5% from signal entry)
+  - Anti-revenge cooldown  (30-min pause after any loss)
+  - Correlation filter     (no two positions on the same base coin)
+  - Funding rate filter    (skip if funding >0.1% against direction)
+  - Trailing stop loss     (SL trails peak price after TP1 hit)
+  - Time-based exit        (close stagnant trades after 24h)
+
+Stage 3 production features:
+  - Portfolio heat limit   (max 6% total risk across all open positions)
+  - Weekly drawdown pause  (halt if down 15% in 7 days until Monday)
+  - Dynamic position sizing (50% size after 2+ consecutive losses)
+  - Weekly performance report (auto Monday + /weekly command)
+  - Live API retry         (Bybit POST retried up to 3x on failure)
 """
 
 import os
@@ -20,7 +27,7 @@ import json
 import logging
 import asyncio
 import requests
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from telegram import Bot
 
 # Import scoring engine from the signal bot (same repo, no duplication)
@@ -59,6 +66,11 @@ REVENGE_COOLDOWN = 1800    # 30-min cool-down after any loss
 TRAIL_STEP_PCT   = 0.5     # trailing SL sits 0.5% behind peak after TP1
 MAX_FUND_RATE    = 0.001   # skip if funding rate >0.1% against direction
 
+# Stage 3 production settings
+PORTFOLIO_HEAT_MAX = 6.0   # max % total risk across all open positions
+WEEKLY_LOSS_LIMIT  = 15.0  # % weekly drawdown that pauses trading until Monday
+LOSS_STREAK_REDUCE = 2     # consecutive losses before cutting position size 50%
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -70,6 +82,9 @@ paper_balance         = float(PAPER_START_BAL)
 daily_stats           = {"date": str(date.today()), "pnl": 0.0, "wins": 0, "losses": 0, "trades": 0}
 total_stats           = {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0}
 last_loss_time        = 0.0   # timestamp of most recent loss (anti-revenge)
+consecutive_losses    = 0     # for dynamic position sizing
+weekly_stats          = {}    # reset each Monday
+last_weekly_report    = ""    # ISO week key of last sent report
 
 # ── Bybit V5 Authenticated API ─────────────────────────────────────────────────
 
@@ -216,12 +231,13 @@ def get_current_price(symbol: str) -> float:
 
 # ── Position Sizing ─────────────────────────────────────────────────────────────
 
-def calc_qty(balance: float, entry: float, sl: float, leverage: int) -> float:
+def calc_qty(balance: float, entry: float, sl: float, leverage: int,
+             risk_pct: float = None) -> float:
     """
-    Size the position so that if SL is hit, exactly RISK_PCT% of balance is lost.
+    Size the position so that if SL is hit, exactly risk_pct% of balance is lost.
     Also capped so margin used never exceeds 25% of balance.
     """
-    risk_usd    = balance * RISK_PCT / 100
+    risk_usd    = balance * (risk_pct if risk_pct is not None else RISK_PCT) / 100
     sl_dist     = abs(entry - sl) / entry
     if sl_dist == 0 or entry == 0:
         return 0.0
@@ -273,7 +289,7 @@ class PaperPosition:
         mult = 1 if self.direction == "LONG" else -1
         return mult * (exit_price - self.entry) / self.entry * self.entry * q * self.leverage
 
-# ── Daily Stats Reset ──────────────────────────────────────────────────────────
+# ── Stats Reset Helpers ────────────────────────────────────────────────────────
 
 def check_reset_daily():
     global daily_stats
@@ -281,10 +297,40 @@ def check_reset_daily():
     if daily_stats["date"] != today:
         daily_stats = {"date": today, "pnl": 0.0, "wins": 0, "losses": 0, "trades": 0}
 
+def current_week_key() -> str:
+    d = date.today()
+    iso = d.isocalendar()
+    return "%d-W%02d" % (iso[0], iso[1])
+
+def check_reset_weekly():
+    global weekly_stats
+    wk = current_week_key()
+    if weekly_stats.get("week") != wk:
+        weekly_stats = {"week": wk, "pnl": 0.0, "wins": 0, "losses": 0, "trades": 0}
+
+def effective_risk_pct() -> float:
+    """Dynamic sizing: halve risk after LOSS_STREAK_REDUCE consecutive losses."""
+    if consecutive_losses >= LOSS_STREAK_REDUCE:
+        return RISK_PCT * 0.5
+    return RISK_PCT
+
+# ── Bybit Retry Wrapper ────────────────────────────────────────────────────────
+
+def bybit_post_retry(endpoint: str, payload: dict, retries: int = 3) -> dict:
+    """Retry critical Bybit POST calls up to 3x with exponential backoff."""
+    result = {}
+    for attempt in range(retries):
+        result = bybit_post(endpoint, payload)
+        if result.get("retCode") == 0:
+            return result
+        if attempt < retries - 1:
+            time.sleep(2 ** attempt)
+    return result
+
 # ── Trade Execution ─────────────────────────────────────────────────────────────
 
 async def execute_trade(result: dict, bot: Bot) -> bool:
-    global paper_balance, daily_stats, total_stats, trading_active, last_loss_time
+    global paper_balance, daily_stats, total_stats, trading_active, last_loss_time, consecutive_losses
 
     symbol    = result["symbol"]
     direction = result["direction"]
@@ -300,6 +346,7 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
 
     # ── Pre-trade safety checks ────────────────────────────────────────────────
     check_reset_daily()
+    check_reset_weekly()
 
     if not trading_active:
         return False
@@ -315,6 +362,28 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
             "[AUTO-TRADER] Daily loss limit hit (%.1f%%).\n"
             "Trading paused until tomorrow.\nUse /resume to override." % DAILY_LOSS_LIMIT))
         trading_active = False
+        return False
+
+    # Stage 3 — Weekly drawdown pause
+    if weekly_stats.get("pnl", 0) <= -(balance * WEEKLY_LOSS_LIMIT / 100):
+        days_left = 7 - date.today().weekday()
+        await bot.send_message(chat_id=CHAT_ID, text=(
+            "[AUTO-TRADER] Weekly loss limit hit (%.1f%%).\n"
+            "Trading paused until Monday.\nUse /resume to override.\n"
+            "Days remaining this week: %d" % (WEEKLY_LOSS_LIMIT, days_left)))
+        trading_active = False
+        return False
+
+    # Stage 3 — Portfolio heat: total risk across all positions
+    eff_risk     = effective_risk_pct()
+    current_heat = sum(
+        getattr(p, "risk_pct_used", RISK_PCT) if isinstance(p, PaperPosition)
+        else p.get("risk_pct_used", RISK_PCT)
+        for p in open_positions.values()
+    )
+    if current_heat + eff_risk > PORTFOLIO_HEAT_MAX:
+        log.info("Portfolio heat %.1f%% + %.1f%% > %.1f%% — skipping %s" % (
+            current_heat, eff_risk, PORTFOLIO_HEAT_MAX, symbol))
         return False
 
     # Stage 2 — Slippage guard: current price must be close to signal entry
@@ -352,7 +421,7 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
     except Exception:
         pass
 
-    qty = calc_qty(balance, entry, sl, leverage)
+    qty = calc_qty(balance, entry, sl, leverage, eff_risk)
     if qty <= 0:
         return False
 
@@ -362,6 +431,7 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
         paper_balance -= margin_used
 
         pos = PaperPosition(symbol, direction, entry, sl, tp1, tp2, tp3, qty, leverage)
+        pos.risk_pct_used = eff_risk   # for portfolio heat tracking
         open_positions[symbol] = pos
 
         daily_stats["trades"] += 1
@@ -404,9 +474,13 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
             text="[AUTO-TRADER] Fill NOT confirmed for %s (order %s).\nCheck Bybit immediately!" % (symbol, order_id))
         return False
 
-    # Attach SL to position
+    # Attach SL to position (with retry for reliability)
     time.sleep(0.3)
-    set_position_sl(symbol, sl)
+    bybit_post_retry("/v5/position/trading-stop", {
+        "category": "linear", "symbol": symbol, "positionIdx": 0,
+        "stopLoss": str(round(sl, 6)), "slTriggerBy": "LastPrice",
+        "slOrderType": "Market", "tpslMode": "Full",
+    })
     time.sleep(0.2)
 
     # Place partial TP orders
@@ -423,6 +497,7 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
         "qty": qty, "qty1": qty1, "qty2": qty2, "qty3": qty3,
         "leverage": leverage, "tp1_hit": False, "tp2_hit": False,
         "breakeven": False, "opened_at": datetime.now(timezone.utc),
+        "risk_pct_used": eff_risk,
     }
     daily_stats["trades"] += 1
     total_stats["trades"] += 1
@@ -449,7 +524,7 @@ async def monitor_positions(bot: Bot):
     Paper mode: poll price every 30s and simulate TP/SL hits.
     Live mode:  check if Bybit still shows the position open.
     """
-    global paper_balance, daily_stats, total_stats, last_loss_time
+    global paper_balance, daily_stats, total_stats, last_loss_time, consecutive_losses, weekly_stats
 
     while True:
         await asyncio.sleep(30)
@@ -545,13 +620,18 @@ async def monitor_positions(bot: Bot):
                     daily_stats["wins"]   += 1
                     total_stats["pnl"]    += pnl
                     total_stats["wins"]   += 1
+                    weekly_stats["pnl"]   = weekly_stats.get("pnl", 0) + pnl
+                    weekly_stats["wins"]  = weekly_stats.get("wins", 0) + 1
+                    weekly_stats["trades"] = weekly_stats.get("trades", 0) + 1
+                    consecutive_losses    = 0   # win resets streak
                     open_positions.pop(symbol)
+                    size_note = "  Size was reduced (loss streak)" if consecutive_losses >= LOSS_STREAK_REDUCE else ""
                     await bot.send_message(chat_id=CHAT_ID, text=(
                         "[PAPER] FULL WIN — %s %s\n"
                         "TP3 hit at $%.5g\n"
-                        "Final profit: +$%.2f\n"
+                        "Final profit: +$%.2f%s\n"
                         "Balance: $%.2f"
-                    ) % (pos.direction, symbol, pos.tp3, pnl, paper_balance))
+                    ) % (pos.direction, symbol, pos.tp3, pnl, size_note, paper_balance))
 
                 elif event == "sl":
                     exit_price = pos.sl   # entry/trailing if TP1 hit, else original SL
@@ -560,15 +640,23 @@ async def monitor_positions(bot: Bot):
                     paper_balance    += margin_back + pnl
                     daily_stats["pnl"] += pnl
                     total_stats["pnl"] += pnl
+                    weekly_stats["pnl"] = weekly_stats.get("pnl", 0) + pnl
+                    weekly_stats["trades"] = weekly_stats.get("trades", 0) + 1
                     if pos.breakeven:
                         daily_stats["wins"] += 1
                         total_stats["wins"] += 1
+                        weekly_stats["wins"] = weekly_stats.get("wins", 0) + 1
+                        consecutive_losses = 0
                         label = "BREAKEVEN/TRAIL EXIT"
                     else:
                         daily_stats["losses"] += 1
                         total_stats["losses"] += 1
+                        weekly_stats["losses"] = weekly_stats.get("losses", 0) + 1
+                        consecutive_losses += 1
+                        last_loss_time = time.time()
                         label = "STOPPED OUT"
-                        last_loss_time = time.time()   # start revenge cooldown
+                        if consecutive_losses >= LOSS_STREAK_REDUCE:
+                            label += " (size halved next trade)"
                     open_positions.pop(symbol)
                     await bot.send_message(chat_id=CHAT_ID, text=(
                         "[PAPER] %s — %s %s\n"
@@ -603,12 +691,18 @@ async def monitor_positions(bot: Bot):
                         paper_balance    += margin_back + pnl
                         daily_stats["pnl"] += pnl
                         total_stats["pnl"] += pnl
+                        weekly_stats["pnl"] = weekly_stats.get("pnl", 0) + pnl
+                        weekly_stats["trades"] = weekly_stats.get("trades", 0) + 1
                         if pnl >= 0:
                             daily_stats["wins"] += 1
                             total_stats["wins"] += 1
+                            weekly_stats["wins"] = weekly_stats.get("wins", 0) + 1
+                            consecutive_losses = 0
                         else:
                             daily_stats["losses"] += 1
                             total_stats["losses"] += 1
+                            weekly_stats["losses"] = weekly_stats.get("losses", 0) + 1
+                            consecutive_losses += 1
                             last_loss_time = time.time()
                         open_positions.pop(symbol)
                         await bot.send_message(chat_id=CHAT_ID, text=(
@@ -705,7 +799,41 @@ async def _send_cmd_help(bot: Bot, chat_id):
         "/balance     — account balance\n"
         "/performance — all-time win rate + P&L\n"
         "/daily       — today's summary\n"
+        "/weekly      — this week's summary\n"
         "/help        — this message"))
+
+async def _send_cmd_weekly(bot: Bot, chat_id):
+    check_reset_weekly()
+    w  = weekly_stats
+    tr = w.get("trades", 0)
+    wr = (w.get("wins", 0) / tr * 100) if tr > 0 else 0.0
+    streak_note = ("\nLoss streak: %d — position size at 50%%" % consecutive_losses
+                   if consecutive_losses >= LOSS_STREAK_REDUCE else "")
+    await bot.send_message(chat_id=chat_id, text=(
+        "[AUTO-TRADER] This Week — %s\n"
+        "Trades: %d\n"
+        "Wins: %d  |  Losses: %d\n"
+        "Win Rate: %.1f%%\n"
+        "Weekly P&L: $%.2f%s"
+    ) % (w.get("week", "—"), tr, w.get("wins", 0), w.get("losses", 0), wr,
+         w.get("pnl", 0.0), streak_note))
+
+async def weekly_reporter(bot: Bot):
+    """Auto-send weekly report every Monday at 00:00–02:00 UTC."""
+    global last_weekly_report
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            now = datetime.now(timezone.utc)
+            if now.weekday() == 0 and now.hour < 2:
+                wk = current_week_key()
+                if last_weekly_report != wk:
+                    check_reset_weekly()
+                    await _send_cmd_weekly(bot, CHAT_ID)
+                    last_weekly_report = wk
+                    log.info("Weekly report sent for %s" % wk)
+        except Exception as e:
+            log.error("Weekly reporter error: %s" % e)
 
 async def command_listener(bot: Bot):
     """Poll Telegram for commands using raw get_updates — no Application framework needed."""
@@ -717,6 +845,7 @@ async def command_listener(bot: Bot):
         "/balance":     _send_cmd_balance,
         "/performance": _send_cmd_performance,
         "/daily":       _send_cmd_daily,
+        "/weekly":      _send_cmd_weekly,
         "/help":        _send_cmd_help,
     }
     while True:
@@ -864,7 +993,7 @@ async def main():
         "  TP3 → let 25%% run\n"
         "  TP1 hit → SL moves to breakeven\n\n"
         "Commands: /stop /resume /status\n"
-        "/balance /performance /daily /help\n\n"
+        "/balance /performance /daily /weekly /help\n\n"
         "Scanning every %ds. Watching the market..."
     ) % (mode, RISK_PCT, MAX_POSITIONS, DAILY_LOSS_LIMIT, MAX_LEVERAGE,
          "Paper balance: $%.2f" % paper_balance if PAPER_TRADE else "Live Bybit account connected.",
@@ -874,6 +1003,7 @@ async def main():
         trading_loop(bot),
         monitor_positions(bot),
         command_listener(bot),
+        weekly_reporter(bot),
     )
 
 if __name__ == "__main__":
