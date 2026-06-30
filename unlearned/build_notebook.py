@@ -114,6 +114,7 @@ print("Run Cell 3.")
 
 CELL_DRIVE = code('''\
 # == CELL 3: Mount Google Drive ================================================
+import os
 from google.colab import drive
 drive.mount("/content/drive", force_remount=False)
 
@@ -142,7 +143,8 @@ _btn = widgets.Button(description="Set Title", button_style="success",
 _out = widgets.Output()
 
 def _set(_):
-    global EPISODE_TITLE
+    global EPISODE_TITLE, WORK_DIR
+    if "WORK_DIR" not in dir(): WORK_DIR = "/content/unlearned"
     EPISODE_TITLE = _title_box.value.strip()
     with _out:
         clear_output()
@@ -166,7 +168,7 @@ CELL_UPLOAD_VOICE = code('''\
 # 4. The voiceover will generate automatically. Do NOT paste script text here.
 
 from google.colab import files as _gcf
-import edge_tts, asyncio, re, json
+import edge_tts, asyncio, re, json, subprocess
 import nest_asyncio; nest_asyncio.apply()
 
 if "EPISODE_TITLE" not in dir() or not EPISODE_TITLE:
