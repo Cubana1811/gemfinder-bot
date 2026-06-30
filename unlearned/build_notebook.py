@@ -41,6 +41,7 @@ Use Canva's Zidan Sasc stick figures — the exact same ones your reference chan
 | Cell 4 | Set episode title |
 | Cell 5 | Upload script → generates voiceover automatically |
 | **Cell 6** | **Downloads a ZIP: one audio file per scene + scene_list.txt** |
+| **Cell 7** | **Generates one image prompt per scene (for Midjourney / DALL-E / Ideogram)** |
 
 Then open Canva (free at canva.com):
 - Create a YouTube video design
@@ -391,6 +392,157 @@ print("""
  5. Export MP4
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """)
+''')
+
+CELL_PROMPT_GEN = code('''\
+# == CELL 7: Generate Image Prompts ============================================
+# Reads your scene voiceover text and outputs a ready-to-use image prompt for
+# every scene — formatted for Midjourney, DALL-E, or any AI image generator.
+# Downloads prompts_XXXX.txt automatically when done.
+# =============================================================================
+import json, os, re
+from google.colab import files as _cf
+
+if "WORK_DIR" not in dir(): WORK_DIR = "/content/unlearned"
+if "SCENE_DATA" not in dir():
+    _jp = f"{WORK_DIR}/scene_data.json"
+    if not os.path.exists(_jp):
+        raise RuntimeError("Run Cell 5 first.")
+    with open(_jp) as _f:
+        SCENE_DATA = json.load(_f)
+if "EPISODE_TITLE" not in dir():
+    _tp = f"{WORK_DIR}/episode_title.txt"
+    EPISODE_TITLE = open(_tp).read().strip() if os.path.exists(_tp) else "Episode"
+
+_ANCHOR = (
+    "Hand-drawn 2D doodle cartoon animation, flat colors, bold black outlines, "
+    "slightly imperfect sketchy marker lines,"
+)
+_LOCK = (
+    "no gradients, no shadows, no textures, no photorealism, no 3D, "
+    "16:9 aspect ratio, educational YouTube explainer doodle style."
+)
+
+_STOPS = set((
+    "a an the in on at is was are were it its of to and or but for with by "
+    "from this that they them their we our you your he she his her not no as "
+    "so be been has have had do does did will would could should may might also "
+    "just than then when where who what how why if all one two three first last "
+    "into out up about more most some any each every can there here now after "
+    "before during while because since though although like even get very much "
+    "many such way make made use used using take took time know think say see "
+    "come went back new old other both own long well still only over day year "
+    "life same become through again those these that"
+).split())
+
+def _bg(text):
+    w = text.lower()
+    if any(x in w for x in ["ancient","prehistoric","cave","fossil","million year","egypt","rome","babylon","mesopotamia","empire"]):
+        return "tan (#C4965A) background"
+    if any(x in w for x in ["danger","threat","predator","attack","kill","dead","blood","murder","deadly","poison","virus"]):
+        return "stark white background, bold red ALL CAPS danger text at top of frame"
+    if any(x in w for x in ["happy","joy","triumph","discover","excit","win","success","celebrat","achieve"]):
+        return "bright white (#FFFFFF) background"
+    if any(x in w for x in ["underwater","ocean","sea","deep","marine","fish","shark","whale","swim"]):
+        return "solid cobalt blue (#2D5FBF) background"
+    if any(x in w for x in ["nature","forest","tree","plant","evolv","jungle","grass","wild","environment","outdoor"]):
+        return "flat green ground strip (#3A9E3A) at bottom, solid sky blue (#6EB5E8) upper half"
+    if any(x in w for x in ["fire","night","ritual","torch","dark","primitive","tribe","sunset","cave","ancient flame"]):
+        return "solid orange (#F5820D) background"
+    if any(x in w for x in ["science","lab","research","experiment","chemical","atom","cell","dna","microscope"]):
+        return "solid cobalt blue (#2D5FBF) background"
+    return "white (#FFFFFF) background"
+
+def _frame(text):
+    w = text.lower()
+    if re.match(r"^\\d+[.):] ", text.strip()) and len(text.split()) <= 12:
+        return "concept_text"
+    if any(x in w for x in ["evolv","progress","develop","transform","became","stages","steps","million year","sequence","from","to"]):
+        return "evolution"
+    if any(x in w for x in ["brain","stress","anxiety","fear","dopamine","cortisol","ego","addiction","trauma","cortex"]):
+        return "villain"
+    if any(x in w for x in ["why","wonder","confus","unsure","but wait","what if","hmm","question"]):
+        return "reaction"
+    if any(x in w for x in ["world","globe","earth","planet","global","everywhere","species","million"]):
+        return "globe"
+    if any(x in w for x in ["called","known as","named","labeled","type of","kind of","part of"]):
+        return "diagram"
+    return "scene"
+
+def _action(text):
+    w = text.lower()
+    if any(x in w for x in ["run","chase","escape","flee"]): return "a stick figure sprinting with motion lines behind it"
+    if any(x in w for x in ["talk","speak","shout","yell","tell"]): return "a stick figure with an open mouth and a speech bubble floating beside it"
+    if any(x in w for x in ["think","wonder","imagine","consider","thought"]): return "a stick figure with a large cloud-shaped thought bubble above its head reading HMMMM in bold caps"
+    if any(x in w for x in ["sad","cry","grief","depress","hurt"]): return "a stick figure with a downturned mouth, shoulders slumped, small blue teardrops falling"
+    if any(x in w for x in ["angry","rage","frustrat","mad"]): return "a stick figure with thick angry brow lines, fists raised, red steam lines from head"
+    if any(x in w for x in ["happy","joy","excit","smile","laugh","celebrat"]): return "a stick figure with a wide smile and arms raised in a V above its head"
+    if any(x in w for x in ["fear","scared","panic","anxious","stress"]): return "a stick figure frozen with wide circle eyes and jagged shock lines radiating outward"
+    if any(x in w for x in ["read","study","learn","book"]): return "a stick figure sitting cross-legged holding an open book, a small lightbulb above its head"
+    if any(x in w for x in ["sleep","rest","tired","exhaust"]): return "a stick figure lying flat with ZZZ letters floating above"
+    if any(x in w for x in ["confus","lost","unsure","doubt"]): return "a stick figure with a large ? above its head and arms shrugged outward"
+    if any(x in w for x in ["work","job","boss","office","business"]): return "a stick figure sitting at a flat desk with a simple laptop shape in front of it"
+    if any(x in w for x in ["walk","step","move","march"]): return "a stick figure mid-stride with one foot raised"
+    return "a stick figure standing upright facing forward with neutral expression"
+
+def _concept(text):
+    words = [w for w in re.findall(r"\\b[A-Za-z]{5,}\\b", text) if w.lower() not in _STOPS]
+    return words[0].upper() if words else "CONCEPT"
+
+def _build(scene):
+    text = scene["text"]
+    bg   = _bg(text)
+    ft   = _frame(text)
+    act  = _action(text)
+    con  = _concept(text)
+
+    if ft == "concept_text":
+        mid = (f"large bold ALL CAPS white marker text \\"{text[:45].upper()}...\\" centered on a dark red (#7B0000) "
+               f"background, white horizontal decorative lines above and below the text,")
+    elif ft == "evolution":
+        mid = (f"left-to-right progression of three chunky cartoon figures connected by thick black right-pointing "
+               f"arrows, each figure slightly more advanced, bold ALL CAPS labels EARLY / MIDDLE / NOW below each stage, {bg},")
+    elif ft == "villain":
+        mid = (f"chunky cartoon {con.lower()} blob with an angry cartoon face — thick brow lines, clenched cartoon "
+               f"fists, bold ALL CAPS label \\"{con}\\" in red at top of frame, {bg},")
+    elif ft == "reaction":
+        mid = (f"{act}, with bold ALL CAPS text \\"WAIT...\\" inside a classic cloud thought bubble above the "
+               f"figure\\'s head, {bg},")
+    elif ft == "globe":
+        mid = (f"chunky cartoon Earth globe centered, surrounded by small floating cartoon creatures and simple "
+               f"flat icons, bold ALL CAPS label \\"{con}\\" at top of frame, {bg},")
+    elif ft == "diagram":
+        mid = (f"{act}, a yellow diagonal arrow pointing at the figure with bold ALL CAPS label \\"{con}\\" "
+               f"beside the arrowhead, {bg},")
+    else:
+        mid = f"{act}, {bg},"
+
+    return f"{_ANCHOR} {mid} {_LOCK}"
+
+# ── Generate prompts ──────────────────────────────────────────────────────────
+print(f"Generating {len(SCENE_DATA)} image prompts...\\n")
+_lines = [f"IMAGE PROMPTS — {EPISODE_TITLE}", "=" * 65, ""]
+
+for _sc in SCENE_DATA:
+    _i   = _sc["idx"]
+    _dur = _sc["duration"]
+    _txt = _sc["text"]
+    _p   = _build(_sc)
+    print(f"  [{_i+1}] {_txt[:60]}...")
+    _lines.append(f"── SCENE {_i+1:03d}  ({_dur:.1f}s) ──────────────────────────────────")
+    _lines.append(f"NARRATION : {_txt}")
+    _lines.append(f"PROMPT    : {_p}")
+    _lines.append("")
+
+_safe = re.sub(r"[^\\w\\s-]+", "", EPISODE_TITLE).strip().replace(" ", "_")
+_out  = f"{WORK_DIR}/prompts_{_safe}.txt"
+with open(_out, "w", encoding="utf-8") as _f:
+    _f.write("\\n".join(_lines))
+
+print(f"\\n✅  {len(SCENE_DATA)} prompts saved.")
+print("Downloading prompts file now...")
+_cf.download(_out)
+print("\\nOpen prompts_XXXX.txt — copy each prompt into Midjourney / DALL-E / Ideogram.")
 ''')
 
 CELL_IMAGES = code('''\
@@ -865,6 +1017,8 @@ CELLS = [
     CELL_TITLE_INPUT, CELL_UPLOAD_VOICE,
     # ── PATH A: Canva export (recommended — matches reference videos exactly)
     CELL_CANVA_EXPORT,
+    # ── PATH A+: Generate image prompts for AI image tools (Midjourney / DALL-E)
+    CELL_PROMPT_GEN,
     # ── PATH B: Fully automated (no Canva needed)
     CELL_IMAGES, CELL_MUSIC, CELL_ASSEMBLE, CELL_DOWNLOAD,
 ]
