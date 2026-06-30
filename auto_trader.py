@@ -74,7 +74,7 @@ MAX_HOLD_HOURS   = 24      # close stagnant position after 24h without TP1
 SLIPPAGE_MAX_PCT = 0.5     # skip entry if price moved >0.5% from signal
 REVENGE_COOLDOWN = 1800    # 30-min cool-down after any loss
 TRAIL_STEP_PCT   = 0.5     # trailing SL sits 0.5% behind peak after TP1
-MAX_FUND_RATE    = 0.001   # skip if funding rate >0.1% against direction
+MAX_FUND_RATE    = 0.1     # skip if funding rate >0.1% against direction
 
 # Stage 3 production settings
 PORTFOLIO_HEAT_MAX = 6.0   # max % total risk across all open positions
@@ -190,10 +190,10 @@ def place_market_order(symbol: str, direction: str, qty: float) -> dict:
         "timeInForce": "GTC",
     })
 
-def confirm_fill(symbol: str, order_id: str, retries: int = 6) -> float:
+async def confirm_fill(symbol: str, order_id: str, retries: int = 6) -> float:
     """Poll until order is filled. Returns average fill price or 0."""
     for _ in range(retries):
-        time.sleep(1)
+        await asyncio.sleep(1)
         data = bybit_get("/v5/order/realtime", {"category": "linear", "symbol": symbol, "orderId": order_id})
         if data.get("retCode") == 0:
             orders = data["result"].get("list", [])
@@ -485,7 +485,7 @@ def load_stats():
 
 # ── Bybit Retry Wrapper ────────────────────────────────────────────────────────
 
-def bybit_post_retry(endpoint: str, payload: dict, retries: int = 3) -> dict:
+async def bybit_post_retry(endpoint: str, payload: dict, retries: int = 3) -> dict:
     """Retry critical Bybit POST calls up to 3x with exponential backoff."""
     result = {}
     for attempt in range(retries):
@@ -493,7 +493,7 @@ def bybit_post_retry(endpoint: str, payload: dict, retries: int = 3) -> dict:
         if result.get("retCode") == 0:
             return result
         if attempt < retries - 1:
-            time.sleep(2 ** attempt)
+            await asyncio.sleep(2 ** attempt)
     return result
 
 # ── Trade Execution ─────────────────────────────────────────────────────────────
@@ -597,10 +597,10 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
         funding = fetch_funding_rate(symbol)
         if isinstance(funding, (int, float)):
             if direction == "LONG" and funding > MAX_FUND_RATE:
-                log.info("Funding filter: %.4f%% vs LONG %s — skipping" % (funding * 100, symbol))
+                log.info("Funding filter: %.4f%% vs LONG %s — skipping" % (funding, symbol))
                 return False
             if direction == "SHORT" and funding < -MAX_FUND_RATE:
-                log.info("Funding filter: %.4f%% vs SHORT %s — skipping" % (funding * 100, symbol))
+                log.info("Funding filter: %.4f%% vs SHORT %s — skipping" % (funding, symbol))
                 return False
     except Exception:
         pass
@@ -665,7 +665,7 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
         return False
 
     order_id   = order["result"]["orderId"]
-    fill_price = confirm_fill(symbol, order_id)
+    fill_price = await confirm_fill(symbol, order_id)
 
     if fill_price == 0:
         await bot.send_message(chat_id=CHAT_ID,
@@ -674,7 +674,7 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
 
     # Attach SL to position (with retry for reliability)
     await asyncio.sleep(0.3)
-    bybit_post_retry("/v5/position/trading-stop", {
+    await bybit_post_retry("/v5/position/trading-stop", {
         "category": "linear", "symbol": symbol, "positionIdx": 0,
         "stopLoss": str(round(sl, 6)), "slTriggerBy": "LastPrice",
         "slOrderType": "Market", "tpslMode": "Full",
@@ -784,6 +784,10 @@ async def monitor_positions(bot: Bot):
                     paper_balance    += margin_back + pnl
                     daily_stats["pnl"] += pnl
                     total_stats["pnl"] += pnl
+                    weekly_stats["pnl"]  = weekly_stats.get("pnl", 0) + pnl
+                    monthly_stats["pnl"] = monthly_stats.get("pnl", 0) + pnl
+                    save_positions()
+                    save_stats()
                     await bot.send_message(chat_id=CHAT_ID, text=(
                         "[PAPER] TP1 HIT — %s %s\n"
                         "Price:   $%.5g\n"
@@ -803,6 +807,10 @@ async def monitor_positions(bot: Bot):
                     paper_balance    += margin_back + pnl
                     daily_stats["pnl"] += pnl
                     total_stats["pnl"] += pnl
+                    weekly_stats["pnl"]  = weekly_stats.get("pnl", 0) + pnl
+                    monthly_stats["pnl"] = monthly_stats.get("pnl", 0) + pnl
+                    save_positions()
+                    save_stats()
                     await bot.send_message(chat_id=CHAT_ID, text=(
                         "[PAPER] TP2 HIT — %s %s\n"
                         "Price:   $%.5g\n"
@@ -829,11 +837,11 @@ async def monitor_positions(bot: Bot):
                     monthly_stats["pnl"]    = monthly_stats.get("pnl", 0) + pnl
                     monthly_stats["wins"]   = monthly_stats.get("wins", 0) + 1
                     monthly_stats["trades"] = monthly_stats.get("trades", 0) + 1
+                    size_note = "  Size was reduced (loss streak)" if consecutive_losses >= LOSS_STREAK_REDUCE else ""
                     consecutive_losses    = 0   # win resets streak
                     open_positions.pop(symbol)
                     save_positions()
                     save_stats()
-                    size_note = "  Size was reduced (loss streak)" if consecutive_losses >= LOSS_STREAK_REDUCE else ""
                     await bot.send_message(chat_id=CHAT_ID, text=(
                         "[PAPER] FULL WIN — %s %s\n"
                         "TP3 hit at $%.5g\n"
@@ -1128,11 +1136,13 @@ async def heartbeat(bot: Bot):
         except Exception as e:
             log.error("Heartbeat error: %s" % e)
 
-_CMD_MAP = None  # initialised in command_listener after bot is known
+_CMD_MAP = {}  # populated in command_listener; guarded below against empty state
 
 async def _dispatch_command(data: dict, bot: Bot):
     """Handle one raw Telegram update dict (from webhook or polling)."""
     try:
+        if not _CMD_MAP:
+            return
         msg = data.get("message") or data.get("edited_message")
         if not msg:
             return
@@ -1339,6 +1349,8 @@ async def main():
 
     # Restore persisted state from previous run
     load_stats()
+    check_reset_weekly()
+    check_reset_monthly()
     load_positions()
     log.info("Startup — balance=$%.2f  peak=$%.2f  positions=%d" % (
         paper_balance, peak_balance, len(open_positions)))
