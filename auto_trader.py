@@ -673,20 +673,20 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
         return False
 
     # Attach SL to position (with retry for reliability)
-    time.sleep(0.3)
+    await asyncio.sleep(0.3)
     bybit_post_retry("/v5/position/trading-stop", {
         "category": "linear", "symbol": symbol, "positionIdx": 0,
         "stopLoss": str(round(sl, 6)), "slTriggerBy": "LastPrice",
         "slOrderType": "Market", "tpslMode": "Full",
     })
-    time.sleep(0.2)
+    await asyncio.sleep(0.2)
 
     # Place partial TP orders
     qty1 = round(qty * TP1_CLOSE, 3)
     qty2 = round(qty * TP2_CLOSE, 3)
     qty3 = round(qty - qty1 - qty2, 3)
-    place_tp_order(symbol, direction, tp1, qty1); time.sleep(0.2)
-    place_tp_order(symbol, direction, tp2, qty2); time.sleep(0.2)
+    place_tp_order(symbol, direction, tp1, qty1); await asyncio.sleep(0.2)
+    place_tp_order(symbol, direction, tp2, qty2); await asyncio.sleep(0.2)
     place_tp_order(symbol, direction, tp3, qty3)
 
     open_positions[symbol] = {
@@ -1277,12 +1277,12 @@ async def trading_loop(bot: Bot):
                     continue
 
                 try:
-                    k1h     = fetch_klines(symbol, "1h", 200);      time.sleep(0.15)
-                    k4h     = fetch_klines(symbol, "4h", 250);      time.sleep(0.15)
-                    k1d     = fetch_klines(symbol, "1d", 250);      time.sleep(0.15)
-                    funding = fetch_funding_rate(symbol);            time.sleep(0.10)
-                    oi_chg  = fetch_oi_change(symbol);              time.sleep(0.10)
-                    ob      = fetch_order_book_imbalance(symbol);   time.sleep(0.10)
+                    k1h     = fetch_klines(symbol, "1h", 200);      await asyncio.sleep(0.15)
+                    k4h     = fetch_klines(symbol, "4h", 250);      await asyncio.sleep(0.15)
+                    k1d     = fetch_klines(symbol, "1d", 250);      await asyncio.sleep(0.15)
+                    funding = fetch_funding_rate(symbol);            await asyncio.sleep(0.10)
+                    oi_chg  = fetch_oi_change(symbol);              await asyncio.sleep(0.10)
+                    ob      = fetch_order_book_imbalance(symbol);   await asyncio.sleep(0.10)
 
                     if not k1h or not k4h:
                         continue
@@ -1301,8 +1301,8 @@ async def trading_loop(bot: Bot):
 
                     if result:
                         direction   = result["direction"]
-                        k1h_bnb     = fetch_klines_bnb(symbol, "1h", 50); time.sleep(0.10)
-                        k1h_okx     = fetch_klines_okx(symbol, "1h", 50); time.sleep(0.10)
+                        k1h_bnb     = fetch_klines_bnb(symbol, "1h", 50); await asyncio.sleep(0.10)
+                        k1h_okx     = fetch_klines_okx(symbol, "1h", 50); await asyncio.sleep(0.10)
                         exchanges   = ["Bybit"]
                         if exchange_confirms(k1h_bnb, direction): exchanges.append("Binance")
                         if exchange_confirms(k1h_okx, direction): exchanges.append("OKX")
