@@ -487,6 +487,23 @@ def btc_is_spiking():
             return True
     return False
 
+def btc_is_ranging():
+    """
+    True if BTC 4h ADX < 20 — market leader is choppy/directionless.
+    When BTC is ranging, crypto altcoin signals are unreliable regardless
+    of their individual setups. Skip the entire crypto scan in this case.
+    """
+    data = safe_get("%s/v5/market/kline?category=linear&symbol=BTCUSDT&interval=240&limit=100" % BYBIT_BASE)
+    if not data or data.get("retCode") != 0:
+        return False
+    klines = list(reversed(data["result"]["list"]))
+    if len(klines) < 30:
+        return False
+    h = [float(k[2]) for k in klines]
+    l = [float(k[3]) for k in klines]
+    c = [float(k[4]) for k in klines]
+    return adx_value(h, l, c) < 20
+
 # ════════════════════════════════════════════════════════════════════════════════
 # TECHNICAL INDICATORS (pure-Python, no deps)
 # ════════════════════════════════════════════════════════════════════════════════
@@ -814,9 +831,12 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     atr4h = atr(h4h, l4h, c4h)
 
     adx4h = adx_value(h4h, l4h, c4h)
+    adx1h = adx_value(h1h, l1h, c1h)
 
     # ── ADX gate: skip choppy/ranging markets ────────────────────────────────
-    if adx4h < 20:
+    # 4h ADX >= 25 ensures a confirmed trending structure on the higher timeframe.
+    # 1h ADX >= 20 ensures the shorter timeframe is also directional, not ranging.
+    if adx4h < 25 or adx1h < 20:
         return None
 
     avg_vol   = sum(v1h[-20:]) / 20 if len(v1h) >= 20 else v1h[-1]
@@ -1730,8 +1750,13 @@ async def main():
             await asyncio.sleep(SCAN_INTERVAL)
             continue
 
+        # ── BTC regime gate ───────────────────────────────────────────────────
+        btc_ranging = btc_is_ranging()
+        if btc_ranging:
+            log.info("BTC 4h ADX < 20 (ranging market) — skipping crypto scan this cycle.")
+
         try:
-            candidates = tv_scan_multi_exchange(filter_side="both", limit=100)
+            candidates = [] if btc_ranging else tv_scan_multi_exchange(filter_side="both", limit=100)
             log.info("TradingView returned %d candidates across 3 exchanges" % len(candidates))
 
             candidates.sort(key=lambda x: abs(x["tv_rating"]), reverse=True)
