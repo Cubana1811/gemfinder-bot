@@ -1128,10 +1128,32 @@ async def heartbeat(bot: Bot):
         except Exception as e:
             log.error("Heartbeat error: %s" % e)
 
+_CMD_MAP = None  # initialised in command_listener after bot is known
+
+async def _dispatch_command(data: dict, bot: Bot):
+    """Handle one raw Telegram update dict (from webhook or polling)."""
+    try:
+        msg = data.get("message") or data.get("edited_message")
+        if not msg:
+            return
+        text    = msg.get("text", "")
+        chat_id = str(msg.get("chat", {}).get("id", ""))
+        if not text or not chat_id:
+            return
+        cmd = text.strip().lower().split("@")[0].split()[0]
+        if cmd in _CMD_MAP:
+            await _CMD_MAP[cmd](bot, chat_id)
+    except Exception as e:
+        log.error("dispatch_command error: %s" % e)
+
 async def command_listener(bot: Bot):
-    """Poll Telegram for commands using raw get_updates — no Application framework needed."""
-    offset = 0
-    cmd_map = {
+    """
+    Webhook mode when RAILWAY_PUBLIC_DOMAIN is set — zero getUpdates calls,
+    zero conflict with other services sharing the same token.
+    Falls back to long-polling when running outside Railway.
+    """
+    global _CMD_MAP
+    _CMD_MAP = {
         "/stop":        _send_cmd_stop,
         "/resume":      _send_cmd_resume,
         "/status":      _send_cmd_status,
@@ -1142,23 +1164,63 @@ async def command_listener(bot: Bot):
         "/monthly":     _send_cmd_monthly,
         "/help":        _send_cmd_help,
     }
-    while True:
+
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
+    port   = int(os.environ.get("PORT", "8080"))
+
+    if domain:
+        # ── Webhook mode (Railway) ─────────────────────────────────────────
         try:
-            updates = await bot.get_updates(offset=offset, timeout=10,
-                                            allowed_updates=["message"])
-            for upd in updates:
-                offset = upd.update_id + 1
-                msg = upd.message
-                if not msg or not msg.text:
-                    continue
-                # strip bot username suffix e.g. /stop@MyBot → /stop
-                cmd = msg.text.strip().lower().split("@")[0].split()[0]
-                if cmd in cmd_map:
-                    await cmd_map[cmd](bot, msg.chat_id)
-        except Exception as e:
-            log.error("Command listener error: %s" % e)
-            await asyncio.sleep(5)
-        await asyncio.sleep(1)
+            from aiohttp import web as aio_web
+
+            webhook_url = "https://%s/tg" % domain
+            await bot.delete_webhook(drop_pending_updates=True)
+            await bot.set_webhook(webhook_url)
+            log.info("Webhook set: %s" % webhook_url)
+
+            async def _handle(request):
+                try:
+                    data = await request.json()
+                    asyncio.create_task(_dispatch_command(data, bot))
+                except Exception as e:
+                    log.error("Webhook handler: %s" % e)
+                return aio_web.Response(text="ok")
+
+            app    = aio_web.Application()
+            app.router.add_post("/tg", _handle)
+            runner = aio_web.AppRunner(app)
+            await runner.setup()
+            await aio_web.TCPSite(runner, "0.0.0.0", port).start()
+            log.info("Webhook server on :%d — commands active" % port)
+
+            while True:
+                await asyncio.sleep(3600)
+
+        except ImportError:
+            log.warning("aiohttp not installed — falling back to polling")
+            domain = ""   # trigger polling fallback below
+
+    if not domain:
+        # ── Polling fallback (local / no public domain) ────────────────────
+        log.info("Polling mode active (no RAILWAY_PUBLIC_DOMAIN)")
+        await bot.delete_webhook(drop_pending_updates=True)
+        offset = 0
+        while True:
+            try:
+                updates = await bot.get_updates(offset=offset, timeout=10,
+                                                allowed_updates=["message"])
+                for upd in updates:
+                    offset = upd.update_id + 1
+                    msg = upd.message
+                    if not msg or not msg.text:
+                        continue
+                    cmd = msg.text.strip().lower().split("@")[0].split()[0]
+                    if cmd in _CMD_MAP:
+                        await _CMD_MAP[cmd](bot, str(msg.chat_id))
+            except Exception as e:
+                log.error("Command listener error: %s" % e)
+                await asyncio.sleep(5)
+            await asyncio.sleep(1)
 
 # ── Main Scan + Trade Loop ──────────────────────────────────────────────────────
 
