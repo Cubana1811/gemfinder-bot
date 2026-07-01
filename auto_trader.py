@@ -106,6 +106,7 @@ weekly_stats          = {}    # reset each Monday
 monthly_stats         = {}    # reset each month
 last_weekly_report    = ""    # ISO week key of last sent report
 last_monthly_report   = ""    # YYYY-MM key of last sent monthly report
+last_daily_report     = ""    # YYYY-MM-DD key of last sent daily report
 bot_start_time        = datetime.now(timezone.utc)
 
 # ── Bybit V5 Authenticated API ─────────────────────────────────────────────────
@@ -309,7 +310,7 @@ class PaperPosition:
     def pnl(self, exit_price: float, qty: float = None) -> float:
         q = qty if qty is not None else self.qty_remaining
         mult = 1 if self.direction == "LONG" else -1
-        return mult * (exit_price - self.entry) / self.entry * self.entry * q * self.leverage
+        return mult * (exit_price - self.entry) * q
 
 # ── Stats Reset Helpers ────────────────────────────────────────────────────────
 
@@ -455,6 +456,7 @@ def save_stats():
                 "last_loss_time":    last_loss_time,
                 "last_weekly_report": last_weekly_report,
                 "last_monthly_report": last_monthly_report,
+                "last_daily_report":  last_daily_report,
             }, f)
     except Exception as e:
         log.error("save_stats error: %s" % e)
@@ -462,7 +464,7 @@ def save_stats():
 def load_stats():
     global paper_balance, peak_balance, daily_stats, total_stats
     global weekly_stats, monthly_stats, consecutive_losses, last_loss_time
-    global last_weekly_report, last_monthly_report
+    global last_weekly_report, last_monthly_report, last_daily_report
     path = os.path.join(DATA_DIR, "stats.json")
     if not os.path.exists(path):
         return
@@ -479,6 +481,7 @@ def load_stats():
         last_loss_time       = d.get("last_loss_time",     0.0)
         last_weekly_report   = d.get("last_weekly_report", "")
         last_monthly_report  = d.get("last_monthly_report", "")
+        last_daily_report    = d.get("last_daily_report",  "")
         log.info("Stats restored from disk")
     except Exception as e:
         log.error("load_stats error: %s" % e)
@@ -508,7 +511,7 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
     tp1       = result["tp1"]
     tp2       = result["tp2"]
     tp3       = result["tp3"]
-    leverage  = min(result.get("leverage_max", 5), MAX_LEVERAGE)
+    leverage  = min(result.get("leverage_max") or 5, MAX_LEVERAGE)
     score     = result["score"]
     tier      = result["tier"]
     rr        = result["rr"]
@@ -728,6 +731,9 @@ async def monitor_positions(bot: Bot):
 
     while True:
         await asyncio.sleep(30)
+        check_reset_daily()
+        check_reset_weekly()
+        check_reset_monthly()
 
         if not open_positions:
             continue
@@ -782,6 +788,8 @@ async def monitor_positions(bot: Bot):
                     pos.qty_remaining = round(pos.qty_remaining - qty_closed, 3)
                     margin_back       = (qty_closed * pos.entry) / pos.leverage
                     paper_balance    += margin_back + pnl
+                    if paper_balance > peak_balance:
+                        peak_balance = paper_balance
                     daily_stats["pnl"] += pnl
                     total_stats["pnl"] += pnl
                     weekly_stats["pnl"]  = weekly_stats.get("pnl", 0) + pnl
@@ -805,6 +813,8 @@ async def monitor_positions(bot: Bot):
                     pos.qty_remaining = round(pos.qty_remaining - qty_closed, 3)
                     margin_back       = (qty_closed * pos.entry) / pos.leverage
                     paper_balance    += margin_back + pnl
+                    if paper_balance > peak_balance:
+                        peak_balance = paper_balance
                     daily_stats["pnl"] += pnl
                     total_stats["pnl"] += pnl
                     weekly_stats["pnl"]  = weekly_stats.get("pnl", 0) + pnl
@@ -839,7 +849,7 @@ async def monitor_positions(bot: Bot):
                     monthly_stats["trades"] = monthly_stats.get("trades", 0) + 1
                     size_note = "  Size was reduced (loss streak)" if consecutive_losses >= LOSS_STREAK_REDUCE else ""
                     consecutive_losses    = 0   # win resets streak
-                    open_positions.pop(symbol)
+                    open_positions.pop(symbol, None)
                     save_positions()
                     save_stats()
                     await bot.send_message(chat_id=CHAT_ID, text=(
@@ -881,7 +891,7 @@ async def monitor_positions(bot: Bot):
                         label = "STOPPED OUT"
                         if consecutive_losses >= LOSS_STREAK_REDUCE:
                             label += " (size halved next trade)"
-                    open_positions.pop(symbol)
+                    open_positions.pop(symbol, None)
                     save_positions()
                     save_stats()
                     await bot.send_message(chat_id=CHAT_ID, text=(
@@ -938,7 +948,7 @@ async def monitor_positions(bot: Bot):
                             monthly_stats["losses"] = monthly_stats.get("losses", 0) + 1
                             consecutive_losses += 1
                             last_loss_time = time.time()
-                        open_positions.pop(symbol)
+                        open_positions.pop(symbol, None)
                         save_positions()
                         save_stats()
                         await bot.send_message(chat_id=CHAT_ID, text=(
@@ -976,7 +986,7 @@ async def _send_cmd_status(bot: Bot, chat_id):
         price = get_current_price(sym)
         if isinstance(pos, PaperPosition):
             pnl  = pos.pnl(price) if price else 0
-            dur  = (datetime.now(timezone.utc) - pos.opened_at).seconds // 60
+            dur  = int((datetime.now(timezone.utc) - pos.opened_at).total_seconds()) // 60
             lines.append(
                 "%s %s\n"
                 "  Entry: $%.5g  |  Now: $%.5g\n"
@@ -1002,6 +1012,7 @@ async def _send_cmd_balance(bot: Bot, chat_id):
     await bot.send_message(chat_id=chat_id, text=msg)
 
 async def _send_cmd_performance(bot: Bot, chat_id):
+    check_reset_daily()
     t  = total_stats
     wr = (t["wins"] / t["trades"] * 100) if t["trades"] > 0 else 0.0
     gp = t.get("gross_profit", 0.0)
@@ -1026,6 +1037,7 @@ async def _send_cmd_performance(bot: Bot, chat_id):
            daily_stats["wins"], daily_stats["losses"], daily_stats["pnl"])))
 
 async def _send_cmd_daily(bot: Bot, chat_id):
+    check_reset_daily()
     d  = daily_stats
     wr = (d["wins"] / d["trades"] * 100) if d["trades"] > 0 else 0.0
     await bot.send_message(chat_id=chat_id, text=(
@@ -1079,40 +1091,90 @@ async def _send_cmd_weekly(bot: Bot, chat_id):
     ) % (w.get("week", "—"), tr, w.get("wins", 0), w.get("losses", 0), wr,
          w.get("pnl", 0.0), streak_note))
 
+async def daily_reporter(bot: Bot):
+    """Auto-send daily P&L summary at UTC midnight (hour 0–1)."""
+    global last_daily_report
+    while True:
+        try:
+            now   = datetime.now(timezone.utc)
+            today = str(date.today())
+            if now.hour < 2 and last_daily_report != today:
+                snap = dict(daily_stats)
+                check_reset_daily()
+                last_daily_report = today
+                save_stats()
+                if snap.get("trades", 0) > 0 and snap.get("date", "") != today:
+                    wr = (snap["wins"] / snap["trades"] * 100) if snap["trades"] > 0 else 0.0
+                    await bot.send_message(chat_id=CHAT_ID, text=(
+                        "[AUTO-TRADER] Daily Report — %s\n"
+                        "Trades:   %d\n"
+                        "Wins: %d  |  Losses: %d\n"
+                        "Win Rate: %.1f%%\n"
+                        "Day P&L:  $%.2f"
+                    ) % (snap["date"], snap["trades"], snap["wins"],
+                         snap["losses"], wr, snap["pnl"]))
+                    log.info("Daily report sent for %s" % snap["date"])
+        except Exception as e:
+            log.error("Daily reporter error: %s" % e)
+        await asyncio.sleep(3600)
+
 async def weekly_reporter(bot: Bot):
     """Auto-send weekly report every Monday at 00:00–02:00 UTC."""
     global last_weekly_report
     while True:
-        await asyncio.sleep(3600)
         try:
             now = datetime.now(timezone.utc)
             if now.weekday() == 0 and now.hour < 2:
                 wk = current_week_key()
                 if last_weekly_report != wk:
+                    snap = dict(weekly_stats)
                     check_reset_weekly()
-                    await _send_cmd_weekly(bot, CHAT_ID)
                     last_weekly_report = wk
                     save_stats()
+                    tr = snap.get("trades", 0)
+                    wr = (snap.get("wins", 0) / tr * 100) if tr > 0 else 0.0
+                    streak_note = ("\nLoss streak: %d — size at 50%%" % consecutive_losses
+                                   if consecutive_losses >= LOSS_STREAK_REDUCE else "")
+                    await bot.send_message(chat_id=CHAT_ID, text=(
+                        "[AUTO-TRADER] Weekly Report — %s\n"
+                        "Trades: %d\n"
+                        "Wins: %d  |  Losses: %d\n"
+                        "Win Rate: %.1f%%\n"
+                        "Weekly P&L: $%.2f%s"
+                    ) % (snap.get("week", "—"), tr, snap.get("wins", 0),
+                         snap.get("losses", 0), wr, snap.get("pnl", 0.0), streak_note))
                     log.info("Weekly report sent for %s" % wk)
         except Exception as e:
             log.error("Weekly reporter error: %s" % e)
+        await asyncio.sleep(3600)
 
 async def monthly_reporter(bot: Bot):
     """Auto-send monthly report on 1st of each month at 00:00–02:00 UTC."""
     global last_monthly_report
     while True:
-        await asyncio.sleep(3600)
         try:
             now = datetime.now(timezone.utc)
             if now.day == 1 and now.hour < 2:
                 mk = current_month_key()
                 if last_monthly_report != mk:
-                    await _send_cmd_monthly(bot, CHAT_ID)
+                    snap = dict(monthly_stats)
+                    check_reset_monthly()
                     last_monthly_report = mk
                     save_stats()
+                    tr = snap.get("trades", 0)
+                    wr = (snap.get("wins", 0) / tr * 100) if tr > 0 else 0.0
+                    await bot.send_message(chat_id=CHAT_ID, text=(
+                        "[AUTO-TRADER] Monthly Report — %s\n"
+                        "Trades: %d\n"
+                        "Wins: %d  |  Losses: %d\n"
+                        "Win Rate: %.1f%%\n"
+                        "Monthly P&L: $%.2f"
+                    ) % (snap.get("month", "—"), tr, snap.get("wins", 0),
+                         snap.get("losses", 0), wr, snap.get("pnl", 0.0)))
                     log.info("Monthly report sent for %s" % mk)
         except Exception as e:
             log.error("Monthly reporter error: %s" % e)
+        await asyncio.sleep(3600)
 
 async def heartbeat(bot: Bot):
     """Send an alive ping every HEARTBEAT_HOURS hours."""
@@ -1349,6 +1411,7 @@ async def main():
 
     # Restore persisted state from previous run
     load_stats()
+    check_reset_daily()
     check_reset_weekly()
     check_reset_monthly()
     load_positions()
@@ -1394,6 +1457,7 @@ async def main():
         trading_loop(bot),
         monitor_positions(bot),
         command_listener(bot),
+        daily_reporter(bot),
         weekly_reporter(bot),
         monthly_reporter(bot),
         heartbeat(bot),
