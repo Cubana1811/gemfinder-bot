@@ -385,6 +385,154 @@ print(f"\\n✅  Voiceover complete!")
 print(f"⏱️   Total duration: {total_duration:.1f}s  ({total_duration/60:.1f} min)")
 """)
 
+CELL_DARK_PROMPT_GEN = code("""\
+# ── STEP 5B (PATH A): Generate Dark Files Image Prompts ─────────────────────
+# For every scene, generates one image prompt that mirrors the EXACT numbers,
+# names and facts spoken in the voiceover — nothing paraphrased.
+# Paste each prompt into Midjourney, DALL-E, Ideogram, or Adobe Firefly.
+# ─────────────────────────────────────────────────────────────────────────────
+import re, json, os
+from google.colab import files as _cf
+
+if 'EPISODE_TITLE' not in dir(): EPISODE_TITLE = 'The Classified Files'
+
+if 'scenes' not in dir() or 'durations' not in dir():
+    _jp = '/content/dark_files/scene_data.json'
+    if not os.path.exists(_jp):
+        raise RuntimeError('Run Step 5 (Voiceover) first.')
+    with open(_jp) as _jf:
+        _sd = json.load(_jf)
+    scenes    = [x['text']     for x in _sd]
+    durations = [x['duration'] for x in _sd]
+
+_ANCHOR = (
+    'Cold case documentary illustration, flat editorial style, '
+    'muted desaturated palette, bold typewriter-style text overlays, '
+    'composed like evidence laid out on a desk,'
+)
+_LOCK = (
+    'no photorealism, no horror aesthetics, no dramatic lighting, '
+    'no stock footage look, no sensationalism, 16:9 aspect ratio, '
+    'investigative documentary visual style.'
+)
+
+def _bg(text):
+    w = text.lower()
+    if any(x in w for x in ['document','file','foia','classif','redact','page','report','sealed','archive','record']):
+        return 'white (#FFFFFF) background, aged paper texture suggestion'
+    if any(x in w for x in ['court','judge','trial','testimony','verdict','lawyer','hearing']):
+        return 'pale institutional gray (#D9D9D9) background'
+    if any(x in w for x in ['cover','suppress','hidden','buried','withheld','denied','conceal']):
+        return 'deep charcoal (#1C1C1C) background'
+    if any(x in w for x in ['found','body','remains','location','miles','address']):
+        return 'dark navy (#0D1B2A) background'
+    if any(x in w for x in ['1800','1900','1910','1920','1930','1940','archive','century','historical']):
+        return 'sepia (#C4965A) aged paper background'
+    return 'aged cream manila paper (#F5F0E8) background'
+
+def _frame(text):
+    w = text.lower()
+    if any(x in w for x in ['document','file','foia','classif','redact','page','report','sealed','filed','record']):
+        return 'document'
+    if any(x in w for x in ['said','testified','stated','claimed','told','according to','witness']):
+        return 'witness_quote'
+    if any(x in w for x in ['official','but the','however','contradict','actually','real version','instead']):
+        return 'contradiction'
+    if any(x in w for x in ['miles','location','address','city','state','county','near','found at']):
+        return 'location'
+    if any(x in w for x in ['timeline','sequence','then','after','before','followed','later','earlier']):
+        return 'timeline'
+    return 'document'
+
+def _extract_overlay(text):
+    # Pull exact number-noun pairs straight from the narration
+    pairs = re.findall(r'\\b(\\d[\\d,]*)\\s+([a-zA-Z]+(?:\\s+[a-zA-Z]+)?)', text)
+    results = [num + ' ' + noun.upper() for num, noun in pairs[:2]]
+    yrs = re.findall(r'\\b(19|20)\\d{2}\\b', text)
+    if yrs and not any(yrs[0] in r for r in results):
+        results.append(yrs[0])
+    return ' — '.join(results[:2])
+
+def _stamp(text):
+    w = text.lower()
+    if any(x in w for x in ['no reason','not filed','no explanation']):        return 'NO REASON FILED'
+    if any(x in w for x in ['top secret','classified','secret']):               return 'CLASSIFIED'
+    if any(x in w for x in ['denied','withheld','refused']):                    return 'DENIED'
+    if any(x in w for x in ['redacted','blacked out','removed']):               return 'REDACTED'
+    return None
+
+def _build(text, dur):
+    bg      = _bg(text)
+    ft      = _frame(text)
+    overlay = _extract_overlay(text)
+    stmp    = _stamp(text)
+
+    overlay_line = (', bold ALL CAPS typewriter text at top of frame reading ' + '"' + overlay + '"') if overlay else ''
+    stamp_line   = (', red rubber stamp reading ' + '"' + stmp + '" slightly crooked in lower corner') if stmp else ''
+
+    if ft == 'document':
+        has_redact   = any(x in text.lower() for x in ['redact','classif','page','foia','sealed'])
+        redact_note  = ', thick black REDACTED bars crossing three lines on the top document page' if has_redact else ''
+        mid = 'open manila file folder with document pages fanning out on aged desk surface' + redact_note + overlay_line + stamp_line + ', ' + bg + ','
+
+    elif ft == 'witness_quote':
+        raw_quote = text[:55].rstrip(',')
+        name_m = re.search(r'\\b([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)?)\\s+(?:said|stated|testified|claimed|told)', text)
+        name   = name_m.group(1).upper() if name_m else 'WITNESS'
+        mid = ('plain white page, large open quotation marks top-left, bold typewriter text '
+               + '"' + raw_quote.upper() + '" centered, '
+               + 'ALL CAPS attribution ' + '"' + name + '" below in smaller typewriter, ' + bg + ',')
+
+    elif ft == 'contradiction':
+        mid = ('split composition — left column bold typewriter header OFFICIAL VERSION, '
+               'right column header DOCUMENT SAYS, thin vertical dividing line, '
+               'contrasting facts in smaller typewriter text below each header' + overlay_line + ', ' + bg + ',')
+
+    elif ft == 'location':
+        loc_m  = re.search(r'\\b([A-Z][a-z]+(?:[,\\s]+[A-Z][a-z]+)?)\\b', text)
+        dist_m = re.search(r'\\b(\\d+)\\s*(mile|kilometer|km|feet|yard)', text)
+        loc_label  = loc_m.group(0).upper() if loc_m else 'LOCATION'
+        dist_label = (dist_m.group(1) + ' ' + dist_m.group(2).upper() + 'S') if dist_m else ''
+        dist_note  = (', distance marker ' + '"' + dist_label + '" in bold red') if dist_label else ''
+        mid = ('minimal flat map outline, simple location pin marker, '
+               'bold ALL CAPS typewriter label ' + '"' + loc_label + '" beside pin'
+               + dist_note + ', ' + bg + ',')
+
+    elif ft == 'timeline':
+        tm = re.findall(r'\\b(?:January|February|March|April|May|June|July|August|September|October|November|December|19\\d{2}|20\\d{2})\\b', text)
+        dates_note = (' key dates: ' + ', '.join(tm[:3]).upper()) if tm else ''
+        mid = ('horizontal timeline bar spanning full frame width,' + dates_note
+               + ' bold typewriter date labels above the line, '
+               'brief ALL CAPS event labels below, ' + bg + ',')
+    else:
+        mid = 'aged manila file folder open on plain desk, ' + bg + ','
+
+    return _ANCHOR + ' ' + mid + ' ' + _LOCK
+
+# ── Generate ──────────────────────────────────────────────────────────────────
+print(f'Generating {len(scenes)} Dark Files image prompts...\\n')
+_lines = ['DARK FILES — IMAGE PROMPTS', 'Episode: ' + EPISODE_TITLE, '=' * 65, '']
+
+for _i, (_txt, _dur) in enumerate(zip(scenes, durations)):
+    _p = _build(_txt, _dur)
+    print(f'  [{_i+1}] {_txt[:65]}')
+    _lines.append(f'── SCENE {_i+1:03d}  ({_dur:.1f}s) ──────────────────────────────────')
+    _lines.append('NARRATION : ' + _txt)
+    _lines.append('PROMPT    : ' + _p)
+    _lines.append('')
+
+_safe = re.sub(r'[^\\w\\s-]+', '', EPISODE_TITLE).strip().replace(' ', '_')
+_out  = '/content/dark_files/dark_files_prompts_' + _safe + '.txt'
+with open(_out, 'w', encoding='utf-8') as _f:
+    _f.write('\\n'.join(_lines))
+
+print(f'\\n✅  {len(scenes)} prompts saved.')
+print('Downloading now...')
+_cf.download(_out)
+print('\\nEach PROMPT mirrors the exact words from the voiceover.')
+print('Paste into Midjourney / DALL-E / Ideogram to generate the image.')
+""")
+
 CELL_LOAD_MODEL = code("""\
 # ── STEP 6: Load Stable Diffusion XL image model ────────────────
 #
@@ -1036,6 +1184,7 @@ notebook = {
         CELL_SCRIPT,
         CELL_PARSER,
         CELL_VOICEOVER,
+        CELL_DARK_PROMPT_GEN,   # PATH A — image prompts (mirrors exact voiceover words)
         CELL_LOAD_MODEL,
         CELL_GEN_CLIPS,
         CELL_MUSIC,
