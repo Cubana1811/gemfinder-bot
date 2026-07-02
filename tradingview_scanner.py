@@ -505,6 +505,142 @@ def btc_is_ranging():
     return adx_value(h, l, c) < 20
 
 # ════════════════════════════════════════════════════════════════════════════════
+# SIGNAL QUALITY DATA SOURCES (free public APIs)
+# ════════════════════════════════════════════════════════════════════════════════
+
+def fetch_btc_dominance() -> float:
+    """BTC market cap dominance % from CoinGecko public API — no auth needed."""
+    data = safe_get("https://api.coingecko.com/api/v3/global")
+    if data and "data" in data:
+        return float(data["data"].get("market_cap_percentage", {}).get("btc", 50.0))
+    return 50.0
+
+def fetch_btc_4h_trend() -> str:
+    """
+    BTC 4h candle trend — are the last 3 closes consistently higher or lower?
+    Returns 'BULL', 'BEAR', or 'NEUTRAL'.
+    Used to gate altcoin signals: going long alts when BTC is in confirmed 4h downtrend
+    has historically low win rates regardless of individual coin setups.
+    """
+    data = safe_get("%s/v5/market/kline?category=linear&symbol=BTCUSDT&interval=240&limit=5" % BYBIT_BASE)
+    if not data or data.get("retCode") != 0:
+        return "NEUTRAL"
+    klines = list(reversed(data["result"]["list"]))
+    if len(klines) < 4:
+        return "NEUTRAL"
+    closes = [float(k[4]) for k in klines[-4:]]
+    if closes[-1] > closes[-2] > closes[-3]:
+        return "BULL"
+    if closes[-1] < closes[-2] < closes[-3]:
+        return "BEAR"
+    return "NEUTRAL"
+
+def fetch_ls_ratio(symbol: str) -> float:
+    """
+    Binance global long/short account ratio for a symbol — free, no auth.
+    > 2.0 = market extremely overcrowded long (contrarian bearish).
+    < 0.5 = market extremely overcrowded short (contrarian bullish / squeeze risk).
+    Returns 1.0 (neutral) on failure.
+    """
+    data = safe_get("%s/futures/data/globalLongShortAccountRatio?symbol=%s&period=1h&limit=3" % (
+        BINANCE_BASE, symbol))
+    if data and isinstance(data, list) and data:
+        return float(data[0].get("longShortRatio", 1.0))
+    return 1.0
+
+def fetch_cvd(symbol: str, limit: int = 200) -> float:
+    """
+    Cumulative Volume Delta from Bybit recent trades.
+    Measures net directional pressure: (buy volume − sell volume) / total volume × 100.
+    Range: −100 (all sellers) to +100 (all buyers).
+    When CVD diverges from price direction, the move lacks conviction.
+    """
+    data = safe_get("%s/v5/market/recent-trade?category=linear&symbol=%s&limit=%d" % (
+        BYBIT_BASE, symbol, limit))
+    if not data or data.get("retCode") != 0:
+        return 0.0
+    trades = data["result"]["list"]
+    if not trades:
+        return 0.0
+    cvd   = sum(float(t["size"]) * (1 if t["side"] == "Buy" else -1) for t in trades)
+    total = sum(float(t["size"]) for t in trades)
+    return round(cvd / total * 100, 1) if total > 0 else 0.0
+
+def stoch_crossover(highs, lows, closes, k_period=14, smooth_k=3, smooth_d=3):
+    """
+    Compute smoothed Stochastic %K and %D from raw klines, then detect crossovers.
+    Returns (k_curr, d_curr, bull_cross, bear_cross).
+
+    bull_cross: K line just crossed ABOVE D line while both are below 35.
+                This is the confirmed end-of-pullback signal — not just being oversold.
+    bear_cross: K line just crossed BELOW D line while both are above 65.
+                Confirmed exhaustion of rally.
+
+    Scoring only the CROSSOVER (not just the zone) eliminates the
+    knife-catching problem of entering purely on an oversold reading.
+    """
+    if len(closes) < k_period + smooth_k + smooth_d + 4:
+        return 50.0, 50.0, False, False
+
+    raw_k = []
+    for i in range(k_period - 1, len(closes)):
+        h_max = max(highs[i - k_period + 1: i + 1])
+        l_min = min(lows[i  - k_period + 1: i + 1])
+        raw_k.append(
+            (closes[i] - l_min) / (h_max - l_min) * 100 if h_max > l_min else 50.0
+        )
+
+    def sma_list(vals, p):
+        return [sum(vals[i: i + p]) / p for i in range(len(vals) - p + 1)]
+
+    k_line = sma_list(raw_k,   smooth_k)
+    d_line = sma_list(k_line,  smooth_d)
+
+    if len(k_line) < 2 or len(d_line) < 2:
+        return 50.0, 50.0, False, False
+
+    k_curr, k_prev = k_line[-1], k_line[-2]
+    d_curr, d_prev = d_line[-1], d_line[-2]
+
+    bull_cross = (k_prev <= d_prev) and (k_curr > d_curr) and k_curr < 35
+    bear_cross = (k_prev >= d_prev) and (k_curr < d_curr) and k_curr > 65
+
+    return round(k_curr, 1), round(d_curr, 1), bull_cross, bear_cross
+
+def atr_percentile(highs, lows, closes, period=14, lookback=100):
+    """
+    Classify current ATR relative to its recent range as a volatility regime.
+    Returns (regime, percentile) where regime is one of:
+      LOW     (<20th pct): consolidation — trend signals fire but rarely play out
+      NORMAL  (20-70th):   healthy momentum conditions
+      HIGH    (70-90th):   expanded volatility — entries need wider stops
+      EXTREME (>90th):     panic/euphoria — TA breaks down, skip or 50% size
+
+    Filters out the LOW regime (choppy squeezes) and the EXTREME regime
+    (random news-driven moves that invalidate all technical setups).
+    """
+    if len(closes) < lookback + period:
+        return "NORMAL", 50.0
+
+    atrs = []
+    for i in range(lookback):
+        idx  = len(closes) - lookback + i
+        h_sl = highs[max(0, idx - period): idx + 1]
+        l_sl = lows[max(0,  idx - period): idx + 1]
+        c_sl = closes[max(0, idx - period): idx + 1]
+        atrs.append(atr(h_sl, l_sl, c_sl, min(period, len(c_sl) - 1)))
+
+    curr = atrs[-1]
+    pct  = sum(1 for v in atrs if v <= curr) / len(atrs) * 100
+
+    if pct < 20:   regime = "LOW"
+    elif pct < 70: regime = "NORMAL"
+    elif pct < 90: regime = "HIGH"
+    else:          regime = "EXTREME"
+
+    return regime, round(pct, 1)
+
+# ════════════════════════════════════════════════════════════════════════════════
 # TECHNICAL INDICATORS (pure-Python, no deps)
 # ════════════════════════════════════════════════════════════════════════════════
 
