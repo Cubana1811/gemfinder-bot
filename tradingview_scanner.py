@@ -505,6 +505,326 @@ def btc_is_ranging():
     return adx_value(h, l, c) < 20
 
 # ════════════════════════════════════════════════════════════════════════════════
+# SIGNAL QUALITY DATA SOURCES (free public APIs)
+# ════════════════════════════════════════════════════════════════════════════════
+
+def fetch_btc_dominance() -> float:
+    """BTC market cap dominance % from CoinGecko public API — no auth needed."""
+    data = safe_get("https://api.coingecko.com/api/v3/global")
+    if data and "data" in data:
+        return float(data["data"].get("market_cap_percentage", {}).get("btc", 50.0))
+    return 50.0
+
+def fetch_btc_4h_trend() -> str:
+    """
+    BTC 4h candle trend — are the last 3 closes consistently higher or lower?
+    Returns 'BULL', 'BEAR', or 'NEUTRAL'.
+    Used to gate altcoin signals: going long alts when BTC is in confirmed 4h downtrend
+    has historically low win rates regardless of individual coin setups.
+    """
+    data = safe_get("%s/v5/market/kline?category=linear&symbol=BTCUSDT&interval=240&limit=5" % BYBIT_BASE)
+    if not data or data.get("retCode") != 0:
+        return "NEUTRAL"
+    klines = list(reversed(data["result"]["list"]))
+    if len(klines) < 4:
+        return "NEUTRAL"
+    closes = [float(k[4]) for k in klines[-4:]]
+    if closes[-1] > closes[-2] > closes[-3]:
+        return "BULL"
+    if closes[-1] < closes[-2] < closes[-3]:
+        return "BEAR"
+    return "NEUTRAL"
+
+def fetch_ls_ratio(symbol: str) -> float:
+    """
+    Binance global long/short account ratio for a symbol — free, no auth.
+    > 2.0 = market extremely overcrowded long (contrarian bearish).
+    < 0.5 = market extremely overcrowded short (contrarian bullish / squeeze risk).
+    Returns 1.0 (neutral) on failure.
+    """
+    data = safe_get("%s/futures/data/globalLongShortAccountRatio?symbol=%s&period=1h&limit=3" % (
+        BINANCE_BASE, symbol))
+    if data and isinstance(data, list) and data:
+        return float(data[0].get("longShortRatio", 1.0))
+    return 1.0
+
+def fetch_cvd(symbol: str, limit: int = 200) -> float:
+    """
+    Cumulative Volume Delta from Bybit recent trades.
+    Measures net directional pressure: (buy volume − sell volume) / total volume × 100.
+    Range: −100 (all sellers) to +100 (all buyers).
+    When CVD diverges from price direction, the move lacks conviction.
+    """
+    data = safe_get("%s/v5/market/recent-trade?category=linear&symbol=%s&limit=%d" % (
+        BYBIT_BASE, symbol, limit))
+    if not data or data.get("retCode") != 0:
+        return 0.0
+    trades = data["result"]["list"]
+    if not trades:
+        return 0.0
+    cvd   = sum(float(t["size"]) * (1 if t["side"] == "Buy" else -1) for t in trades)
+    total = sum(float(t["size"]) for t in trades)
+    return round(cvd / total * 100, 1) if total > 0 else 0.0
+
+def stoch_crossover(highs, lows, closes, k_period=14, smooth_k=3, smooth_d=3):
+    """
+    Compute smoothed Stochastic %K and %D from raw klines, then detect crossovers.
+    Returns (k_curr, d_curr, bull_cross, bear_cross).
+
+    bull_cross: K line just crossed ABOVE D line while both are below 35.
+                This is the confirmed end-of-pullback signal — not just being oversold.
+    bear_cross: K line just crossed BELOW D line while both are above 65.
+                Confirmed exhaustion of rally.
+
+    Scoring only the CROSSOVER (not just the zone) eliminates the
+    knife-catching problem of entering purely on an oversold reading.
+    """
+    if len(closes) < k_period + smooth_k + smooth_d + 4:
+        return 50.0, 50.0, False, False
+
+    raw_k = []
+    for i in range(k_period - 1, len(closes)):
+        h_max = max(highs[i - k_period + 1: i + 1])
+        l_min = min(lows[i  - k_period + 1: i + 1])
+        raw_k.append(
+            (closes[i] - l_min) / (h_max - l_min) * 100 if h_max > l_min else 50.0
+        )
+
+    def sma_list(vals, p):
+        return [sum(vals[i: i + p]) / p for i in range(len(vals) - p + 1)]
+
+    k_line = sma_list(raw_k,   smooth_k)
+    d_line = sma_list(k_line,  smooth_d)
+
+    if len(k_line) < 2 or len(d_line) < 2:
+        return 50.0, 50.0, False, False
+
+    k_curr, k_prev = k_line[-1], k_line[-2]
+    d_curr, d_prev = d_line[-1], d_line[-2]
+
+    bull_cross = (k_prev <= d_prev) and (k_curr > d_curr) and k_curr < 35
+    bear_cross = (k_prev >= d_prev) and (k_curr < d_curr) and k_curr > 65
+
+    return round(k_curr, 1), round(d_curr, 1), bull_cross, bear_cross
+
+def atr_percentile(highs, lows, closes, period=14, lookback=100):
+    """
+    Classify current ATR relative to its recent range as a volatility regime.
+    Returns (regime, percentile) where regime is one of:
+      LOW     (<20th pct): consolidation — trend signals fire but rarely play out
+      NORMAL  (20-70th):   healthy momentum conditions
+      HIGH    (70-90th):   expanded volatility — entries need wider stops
+      EXTREME (>90th):     panic/euphoria — TA breaks down, skip or 50% size
+
+    Filters out the LOW regime (choppy squeezes) and the EXTREME regime
+    (random news-driven moves that invalidate all technical setups).
+    """
+    if len(closes) < lookback + period:
+        return "NORMAL", 50.0
+
+    atrs = []
+    for i in range(lookback):
+        idx  = len(closes) - lookback + i
+        h_sl = highs[max(0, idx - period): idx + 1]
+        l_sl = lows[max(0,  idx - period): idx + 1]
+        c_sl = closes[max(0, idx - period): idx + 1]
+        atrs.append(atr(h_sl, l_sl, c_sl, min(period, len(c_sl) - 1)))
+
+    curr = atrs[-1]
+    pct  = sum(1 for v in atrs if v <= curr) / len(atrs) * 100
+
+    if pct < 20:   regime = "LOW"
+    elif pct < 70: regime = "NORMAL"
+    elif pct < 90: regime = "HIGH"
+    else:          regime = "EXTREME"
+
+    return regime, round(pct, 1)
+
+
+def cmf(highs, lows, closes, volumes, period=20):
+    """Chaikin Money Flow: volume-weighted close position within H-L range. Range: -1 to +1."""
+    if len(closes) < period + 1:
+        return 0.0
+    mfm = []
+    for i in range(len(closes)):
+        hl = highs[i] - lows[i]
+        mfm.append(((closes[i] - lows[i]) - (highs[i] - closes[i])) / hl if hl else 0.0)
+    mfv20 = sum(mfm[i] * volumes[i] for i in range(-period, 0))
+    vol20  = sum(volumes[-period:])
+    return round(mfv20 / vol20, 4) if vol20 > 0 else 0.0
+
+
+def roc(closes, period):
+    """Rate of Change: % price change from N bars ago."""
+    if len(closes) <= period or closes[-period] == 0:
+        return 0.0
+    return (closes[-1] - closes[-period]) / closes[-period] * 100
+
+
+def price_zscore(closes, lookback=20):
+    """Z-score of current close vs recent mean — detects extended/exhausted price moves."""
+    if len(closes) < lookback:
+        return 0.0
+    window = closes[-lookback:]
+    mean   = sum(window) / lookback
+    std    = (sum((x - mean) ** 2 for x in window) / lookback) ** 0.5
+    return (closes[-1] - mean) / std if std else 0.0
+
+
+def rsi_zscore(closes, rsi_period=14, lookback=50):
+    """
+    Adaptive RSI: z-score of current RSI vs its own N-bar distribution.
+    Replaces fixed 70/30 thresholds with regime-aware levels.
+    z > +1.8 = statistically overbought for this asset NOW (even if RSI is only 65 in a bull).
+    z < -1.8 = statistically oversold for this asset NOW.
+    """
+    needed = rsi_period + lookback + 2
+    if len(closes) < needed:
+        return 0.0
+    series = [rsi(closes[:len(closes) - lookback + i + 1]) for i in range(lookback)]
+    mean   = sum(series) / lookback
+    std    = (sum((x - mean) ** 2 for x in series) / lookback) ** 0.5
+    return (series[-1] - mean) / std if std else 0.0
+
+
+def fetch_dvol() -> float:
+    """
+    Deribit Volatility Index (DVOL) for BTC — free public endpoint, no auth required.
+    Crypto-native VIX. >90 = extreme uncertainty, TA unreliable. <35 = calm, trend continuation likely.
+    """
+    data = safe_get("https://www.deribit.com/api/v2/public/get_index_price?index_name=dvol_btc")
+    if data and data.get("result"):
+        return float(data["result"].get("index_price", 55.0))
+    return 55.0
+
+
+def fetch_eth_btc_trend() -> str:
+    """
+    ETH/BTC 4h ratio trend — proxy for altseason vs BTC dominance rotation.
+    BULL = ETH outperforming BTC → altcoins broadly favoured.
+    BEAR = BTC absorbing capital → altcoin longs face systematic headwind.
+    """
+    btc = safe_get("%s/v5/market/kline?category=linear&symbol=BTCUSDT&interval=240&limit=8" % BYBIT_BASE)
+    eth = safe_get("%s/v5/market/kline?category=linear&symbol=ETHUSDT&interval=240&limit=8" % BYBIT_BASE)
+    if not btc or not eth or btc.get("retCode") != 0 or eth.get("retCode") != 0:
+        return "NEUTRAL"
+    btc_cl = [float(k[4]) for k in reversed(btc["result"]["list"])]
+    eth_cl = [float(k[4]) for k in reversed(eth["result"]["list"])]
+    if len(btc_cl) < 5 or len(eth_cl) < 5 or btc_cl[-5] == 0:
+        return "NEUTRAL"
+    ratio_now = eth_cl[-1] / btc_cl[-1]
+    ratio_ago = eth_cl[-5] / btc_cl[-5]
+    chg = (ratio_now - ratio_ago) / ratio_ago * 100 if ratio_ago else 0
+    if chg > 2:  return "BULL"
+    if chg < -2: return "BEAR"
+    return "NEUTRAL"
+
+
+def fetch_layered_ob_imbalance(symbol: str):
+    """
+    Three-tier order book imbalance (top 5, mid 5-20, outer 20-50 levels).
+    Tier1 alone can be spoofing; tier3 alignment = institutional conviction.
+    Returns (tier1_ratio, tier2_ratio, tier3_ratio) — all ratios bid/ask.
+    """
+    data = safe_get("%s/v5/market/orderbook?category=linear&symbol=%s&limit=50" % (
+        BYBIT_BASE, symbol))
+    if not data or data.get("retCode") != 0:
+        return 1.0, 1.0, 1.0
+    bids = data["result"].get("b", [])
+    asks = data["result"].get("a", [])
+    def _ratio(b_sl, a_sl):
+        bv = sum(float(b[0]) * float(b[1]) for b in b_sl)
+        av = sum(float(a[0]) * float(a[1]) for a in a_sl)
+        return round(bv / av, 3) if av > 0 else 1.0
+    return (_ratio(bids[:5],   asks[:5]),
+            _ratio(bids[5:20], asks[5:20]),
+            _ratio(bids[20:],  asks[20:]))
+
+
+def volume_profile(highs, lows, volumes, n_bins=50, lookback=100):
+    """
+    Approximate volume profile from OHLCV klines (distributes each bar's volume across H-L range).
+    POC = price level with most traded volume (institutional price anchor).
+    VAH/VAL = bounds of Value Area containing 70% of volume.
+    Returns (poc, vah, val) or (0, 0, 0) on insufficient data.
+    """
+    if len(highs) < lookback or len(volumes) < lookback:
+        return 0.0, 0.0, 0.0
+    h_sl, l_sl, v_sl = highs[-lookback:], lows[-lookback:], volumes[-lookback:]
+    p_min, p_max = min(l_sl), max(h_sl)
+    if p_max <= p_min:
+        return 0.0, 0.0, 0.0
+    bucket  = (p_max - p_min) / n_bins
+    profile = [0.0] * n_bins
+    centers = [p_min + (i + 0.5) * bucket for i in range(n_bins)]
+    for i in range(len(h_sl)):
+        bars = [b for b, c in enumerate(centers) if l_sl[i] <= c <= h_sl[i]]
+        if bars:
+            share = v_sl[i] / len(bars)
+            for b in bars:
+                profile[b] += share
+    poc_i = profile.index(max(profile))
+    total = sum(profile)
+    lo_i  = hi_i = poc_i
+    acc   = profile[poc_i]
+    while acc < total * 0.70 and (lo_i > 0 or hi_i < n_bins - 1):
+        up = profile[hi_i + 1] if hi_i + 1 < n_bins else 0
+        dn = profile[lo_i - 1] if lo_i > 0 else 0
+        if up == 0 and dn == 0:
+            break  # volume gap on both sides — can't grow value area further
+        if hi_i < n_bins - 1 and (up >= dn or lo_i == 0):
+            hi_i += 1; acc += up
+        elif lo_i > 0:
+            lo_i -= 1; acc += dn
+        else:
+            break
+    return centers[poc_i], centers[hi_i], centers[lo_i]
+
+
+def fetch_lunarcrush(symbol: str) -> dict:
+    """
+    LunarCrush public API — social sentiment for crypto assets.
+    Galaxy Score 0-100: >70 = bullish sentiment, <30 = bearish.
+    Returns defaults on failure (neutral: galaxy_score=50).
+    """
+    coin = symbol.replace("USDT", "").lower()
+    data = safe_get("https://lunarcrush.com/api4/public/coins/%s/v1" % coin)
+    if data and "data" in data:
+        d = data["data"]
+        return {"galaxy_score":     float(d.get("galaxy_score", 50)),
+                "social_dominance": float(d.get("social_dominance", 0))}
+    return {"galaxy_score": 50, "social_dominance": 0}
+
+
+def load_regime() -> dict:
+    """Read current market regime from regime.json produced by market_regime.py."""
+    try:
+        import json as _json
+        path = os.path.join(os.environ.get("DATA_DIR", "/app/data"), "regime.json")
+        with open(path) as f:
+            return _json.load(f)
+    except Exception:
+        return {"regime": "UNKNOWN"}
+
+
+def fetch_dxy_signal() -> float:
+    """
+    Fetch DXY (US Dollar Index) TradingView rating via the forex screener.
+    Positive = USD strengthening (crypto headwind). Negative = USD weakening (crypto tailwind).
+    Returns 0.0 (neutral) on failure or if DXY not in results.
+    """
+    try:
+        rows = tv_scan_forex(filter_side="both", limit=50)
+        for r in rows:
+            sym = r.get("symbol", "")
+            if "DXY" in sym or "USDX" in sym:
+                return float(r.get("tv_rating", 0.0))
+    except Exception:
+        pass
+    return 0.0
+
+
+# ════════════════════════════════════════════════════════════════════════════════
 # TECHNICAL INDICATORS (pure-Python, no deps)
 # ════════════════════════════════════════════════════════════════════════════════
 
@@ -793,7 +1113,8 @@ def market_structure(highs, lows, lookback=5):
 # ════════════════════════════════════════════════════════════════════════════════
 
 def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.0,
-                top_trader_ratio=1.0, taker_ratio=1.0, ob_imbalance=1.0):
+                top_trader_ratio=1.0, taker_ratio=1.0, ob_imbalance=1.0,
+                cvd=0.0, ls_ratio=1.0):
     """
     Score a symbol using TradingView ratings + Bybit candle confirmation.
     Daily candles used as HTF trend filter. Funding + OI gate extreme conditions.
@@ -813,6 +1134,14 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     tv_rating  = tv["tv_rating"]
     tv_ma      = tv["tv_ma"]
     tv_osc     = tv["tv_osc"]
+
+    # ── Market regime gate (reads regime.json from market_regime.py) ──────────
+    regime_data    = load_regime()
+    current_regime = regime_data.get("regime", "UNKNOWN")
+    if current_regime == "BEAR" and tv_rating > 0:
+        return None   # no longs in a confirmed bear market regime
+    if current_regime == "BULL" and tv_rating < 0:
+        return None   # no shorts in a confirmed bull market regime
 
     # ── Bybit indicators ────────────────────────────────────────────────────
     rsi1h  = rsi(c1h)
@@ -839,6 +1168,22 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     if adx4h < 25 or adx1h < 20:
         return None
 
+    # ── ATR volatility regime gate ────────────────────────────────────────────
+    atr_regime, atr_pct_val = atr_percentile(h1h, l1h, c1h)
+    if atr_regime == "LOW":
+        return None   # consolidation: trend signals fire but rarely follow through
+    if atr_regime == "EXTREME":
+        return None   # panic/euphoria: TA breaks down, stops get blown through
+
+    # ── OI divergence gate: fake breakout detection ───────────────────────────
+    if len(c4h) >= 10:
+        price_at_4h_high = price >= max(c4h[-10:-1]) * 0.995
+        price_at_4h_low  = price <= min(c4h[-10:-1]) * 1.005
+        if price_at_4h_high and oi_chg < -3.0 and tv_rating > 0:
+            return None  # new 4h high but OI falling = short-cover rally, not real breakout
+        if price_at_4h_low and oi_chg < -3.0 and tv_rating < 0:
+            return None  # new 4h low but OI falling = long liquidation, not new bears
+
     avg_vol   = sum(v1h[-20:]) / 20 if len(v1h) >= 20 else v1h[-1]
     vol_spike = v1h[-1] / avg_vol if avg_vol > 0 else 1
 
@@ -864,6 +1209,12 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     if tv_rating < 0 and funding < -0.05:
         return None
 
+    # ── Compound Funding × OI crowding gate ──────────────────────────────────
+    if tv_rating > 0 and funding > 0.04 and oi_chg > 15:
+        return None  # longs overcrowded + new money piling in = liquidation cascade risk
+    if tv_rating < 0 and funding < -0.04 and oi_chg > 15:
+        return None  # shorts overcrowded + new money piling in = short squeeze risk
+
     # ── Candle structure gate ─────────────────────────────────────────────────
     bull_candles, bear_candles = candle_structure(o1h, c1h)
     if tv_rating > 0 and bull_candles < 2:
@@ -875,8 +1226,49 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     bb_expanding, bb_width_pct = bb_squeeze_state(c1h)
     bull_sweep, bear_sweep     = liquidity_sweep(h1h, l1h, c1h, o1h)
 
-    fear_greed = market.get("fear_greed", 50)
-    btc_chg    = market.get("btc_chg", 0)
+    # ── Context from market dict (fetched once per scan cycle) ────────────────
+    fear_greed  = market.get("fear_greed", 50)
+    btc_chg     = market.get("btc_chg", 0)
+    btc_4h      = market.get("btc_4h_trend", "NEUTRAL")
+    btc_dom     = market.get("btc_dom", 50.0)
+    eth_btc     = market.get("eth_btc_trend", "NEUTRAL")
+    dvol_val    = market.get("dvol", 55.0)
+    dxy_rt      = market.get("dxy_rating", 0.0)
+    symbol      = tv["symbol"]
+    vwap        = tv.get("vwap", 0)
+    cci_val     = tv.get("cci", 0)
+    wr_val      = tv.get("williams_r", -50)
+
+    # ── Stochastic crossover ──────────────────────────────────────────────────
+    sk, sd, stoch_bull, stoch_bear = stoch_crossover(h1h, l1h, c1h)
+
+    # ── Chaikin Money Flow (1h + 4h) ─────────────────────────────────────────
+    cmf_1h = cmf(h1h, l1h, c1h, v1h)
+    cmf_4h = cmf(h4h, l4h, c4h, v4h)
+
+    # ── Rate of Change ────────────────────────────────────────────────────────
+    roc5_1h  = roc(c1h, 5)
+    roc20_1h = roc(c1h, 20)
+
+    # ── Price Z-score ─────────────────────────────────────────────────────────
+    price_z = price_zscore(c1h)
+
+    # ── RSI Z-scores (adaptive thresholds for this asset's current regime) ────
+    rsi_z_1h = rsi_zscore(c1h)
+    rsi_z_4h = rsi_zscore(c4h)
+
+    # ── RSI divergence: compare current RSI direction vs price direction ──────
+    rsi_ago_1h   = rsi(c1h[:-10]) if len(c1h) > 24 else rsi1h
+    rsi_ago_4h   = rsi(c4h[:-10]) if len(c4h) > 24 else rsi4h
+    price_ago_1h = c1h[-11]       if len(c1h) > 11 else price
+    price_ago_4h = c4h[-11]       if len(c4h) > 11 else (c4h[-1] if c4h else price)
+    div_1h = ("BEARISH_DIV" if price > price_ago_1h     and rsi1h < rsi_ago_1h - 5 else
+              "BULLISH_DIV" if price < price_ago_1h     and rsi1h > rsi_ago_1h + 5 else "NONE")
+    div_4h = ("BEARISH_DIV" if c4h[-1] > price_ago_4h  and rsi4h < rsi_ago_4h - 5 else
+              "BULLISH_DIV" if c4h[-1] < price_ago_4h  and rsi4h > rsi_ago_4h + 5 else "NONE")
+
+    # ── Volume Profile: POC / VAH / VAL ──────────────────────────────────────
+    poc_4h, vah_4h, val_4h = volume_profile(h4h, l4h, v4h)
 
     long_score  = 0
     short_score = 0
@@ -910,20 +1302,22 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     elif tv_osc <= -0.3:
         short_score += 10; short_reasons.append("TV oscillators bearish (%.2f)" % tv_osc)
 
-    # 2. RSI confirmation (max 20)
-    if rsi1h < 30:
-        long_score += 12; long_reasons.append("RSI 1h oversold (%.1f)" % rsi1h)
-    elif rsi1h < 40:
-        long_score += 6;  long_reasons.append("RSI 1h low (%.1f)" % rsi1h)
-    if rsi4h < 35:
-        long_score += 8;  long_reasons.append("RSI 4h oversold (%.1f)" % rsi4h)
+    # 2. RSI confirmation — adaptive z-score thresholds (max 20)
+    # Z-score detects whether RSI is extreme relative to THIS asset's recent range,
+    # preventing false short signals on assets that structurally run at RSI 65-75 in bull trends.
+    if rsi_z_1h < -1.8 or rsi1h < 30:
+        long_score += 12; long_reasons.append("RSI 1h oversold Z=%.1f (%.1f)" % (rsi_z_1h, rsi1h))
+    elif rsi_z_1h < -1.0 or rsi1h < 40:
+        long_score += 6;  long_reasons.append("RSI 1h low Z=%.1f (%.1f)" % (rsi_z_1h, rsi1h))
+    if rsi_z_4h < -1.5 or rsi4h < 35:
+        long_score += 8;  long_reasons.append("RSI 4h oversold Z=%.1f (%.1f)" % (rsi_z_4h, rsi4h))
 
-    if rsi1h > 70:
-        short_score += 12; short_reasons.append("RSI 1h overbought (%.1f)" % rsi1h)
-    elif rsi1h > 60:
-        short_score += 6;  short_reasons.append("RSI 1h high (%.1f)" % rsi1h)
-    if rsi4h > 65:
-        short_score += 8;  short_reasons.append("RSI 4h overbought (%.1f)" % rsi4h)
+    if rsi_z_1h > 1.8 or rsi1h > 70:
+        short_score += 12; short_reasons.append("RSI 1h overbought Z=%.1f (%.1f)" % (rsi_z_1h, rsi1h))
+    elif rsi_z_1h > 1.0 or rsi1h > 60:
+        short_score += 6;  short_reasons.append("RSI 1h high Z=%.1f (%.1f)" % (rsi_z_1h, rsi1h))
+    if rsi_z_4h > 1.5 or rsi4h > 65:
+        short_score += 8;  short_reasons.append("RSI 4h overbought Z=%.1f (%.1f)" % (rsi_z_4h, rsi4h))
 
     # 3. MACD multi-TF (max 15)
     if mh1h > 0 and mh4h > 0:
@@ -1007,19 +1401,27 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
         elif funding > 0.02:
             short_score += 5; short_reasons.append("Positive funding %.3f%% (longs pay shorts)" % funding)
 
-    # 10. Open Interest confirmation (max 10)
-    if oi_chg > 5 and tv_rating > 0:
-        long_score += 10; long_reasons.append("OI rising +%.1f%% confirms long momentum" % oi_chg)
-    elif oi_chg > 2 and tv_rating > 0:
-        long_score += 5
-    elif oi_chg < -5 and tv_rating > 0:
-        long_score -= 5
-    if oi_chg > 5 and tv_rating < 0:
-        short_score += 10; short_reasons.append("OI rising +%.1f%% confirms short momentum" % oi_chg)
-    elif oi_chg > 2 and tv_rating < 0:
-        short_score += 5
-    elif oi_chg < -5 and tv_rating < 0:
-        short_score -= 5
+    # 10. Open Interest — classified by regime (max 12)
+    # GENUINE: price + OI both rising = new money entering = high-conviction signal
+    # SQUEEZE: price moving but OI falling = position unwinding = weaker signal
+    if tv_rating > 0:
+        if oi_chg > 5:
+            long_score += 12; long_reasons.append("GENUINE BULL: OI +%.1f%% — new longs entering" % oi_chg)
+        elif oi_chg > 2:
+            long_score += 6
+        elif -3 < oi_chg < 0:
+            long_score += 4; long_reasons.append("SHORT SQUEEZE: OI declining, price recovering")
+        elif oi_chg <= -3:
+            long_score -= 6  # OI sharply falling = liquidation rally, not real buying
+    if tv_rating < 0:
+        if oi_chg > 5:
+            short_score += 12; short_reasons.append("GENUINE BEAR: OI +%.1f%% — new shorts entering" % oi_chg)
+        elif oi_chg > 2:
+            short_score += 6
+        elif -3 < oi_chg < 0:
+            short_score += 4; short_reasons.append("LONG SQUEEZE: OI declining, price falling")
+        elif oi_chg <= -3:
+            short_score -= 6
 
     # 11. Bollinger Band squeeze breakout (max 12)
     if bb_expanding:
@@ -1093,23 +1495,186 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     elif ob_imbalance <= 0.83 and tv_rating < 0:
         short_score += 3
 
+    # 18. CVD — cumulative volume delta (max 10, -10 divergence penalty)
+    if cvd > 30 and tv_rating > 0:
+        long_score += 10; long_reasons.append("CVD +%.1f%% — aggressive buyers dominating" % cvd)
+    elif cvd > 10 and tv_rating > 0:
+        long_score += 5
+    elif cvd < -20 and tv_rating > 0:
+        long_score -= 10  # price rising but sellers still aggressive = conviction absent
+    if cvd < -30 and tv_rating < 0:
+        short_score += 10; short_reasons.append("CVD -%.1f%% — aggressive sellers dominating" % abs(cvd))
+    elif cvd < -10 and tv_rating < 0:
+        short_score += 5
+    elif cvd > 20 and tv_rating < 0:
+        short_score -= 10
+
+    # 19. Stochastic crossover — requires the TURN not just the level (max 12)
+    if stoch_bull and tv_rating > 0:
+        long_score += 12; long_reasons.append("Stoch bull cross <35 (K=%.1f D=%.1f) — reversal confirmed" % (sk, sd))
+    if stoch_bear and tv_rating < 0:
+        short_score += 12; short_reasons.append("Stoch bear cross >65 (K=%.1f D=%.1f) — exhaustion confirmed" % (sk, sd))
+
+    # 20. BTC macro context — 4h trend + dominance (max 13)
+    if btc_4h == "BULL" and tv_rating > 0:
+        long_score += 8; long_reasons.append("BTC 4h trend BULL — macro tailwind for longs")
+    elif btc_4h == "BEAR" and tv_rating > 0:
+        long_score -= 5  # going long alts when BTC 4h is bearish = systematic headwind
+    if btc_4h == "BEAR" and tv_rating < 0:
+        short_score += 8; short_reasons.append("BTC 4h trend BEAR — macro tailwind for shorts")
+    elif btc_4h == "BULL" and tv_rating < 0:
+        short_score -= 5
+    if symbol not in ("BTCUSDT", "ETHUSDT"):
+        if btc_dom > 60 and tv_rating > 0:
+            long_score -= 5  # BTC dominance >60% = capital leaving alts
+        elif btc_dom < 45 and tv_rating > 0:
+            long_score += 5; long_reasons.append("BTC dom %.1f%% — altseason conditions" % btc_dom)
+
+    # 21. RSI divergence filter — penalise hidden weakness / hidden strength (max -10 / +5)
+    if div_4h == "BEARISH_DIV" and tv_rating > 0:
+        long_score -= 10  # price making higher highs but RSI falling = exhaustion
+    if div_4h == "BULLISH_DIV" and tv_rating < 0:
+        short_score -= 10  # price making lower lows but RSI rising = selling pressure waning
+    if div_4h == "BULLISH_DIV" and tv_rating > 0:
+        long_score += 5; long_reasons.append("Bullish RSI div 4h — hidden buying strength")
+    if div_4h == "BEARISH_DIV" and tv_rating < 0:
+        short_score += 5; short_reasons.append("Bearish RSI div 4h — hidden selling pressure")
+
+    # 22. Chaikin Money Flow — volume-weighted direction quality (max 10, -8 divergence)
+    if cmf_1h > 0.1 and cmf_4h > 0.1 and tv_rating > 0:
+        long_score += 10; long_reasons.append("CMF bullish 1h=%.3f 4h=%.3f — buyers absorbing supply" % (cmf_1h, cmf_4h))
+    elif cmf_1h > 0.05 and tv_rating > 0:
+        long_score += 5
+    elif cmf_1h < -0.1 and tv_rating > 0:
+        long_score -= 8  # price rising but CMF negative = distribution into rally
+    if cmf_1h < -0.1 and cmf_4h < -0.1 and tv_rating < 0:
+        short_score += 10; short_reasons.append("CMF bearish 1h=%.3f 4h=%.3f — sellers unloading" % (cmf_1h, cmf_4h))
+    elif cmf_1h < -0.05 and tv_rating < 0:
+        short_score += 5
+    elif cmf_1h > 0.1 and tv_rating < 0:
+        short_score -= 8
+
+    # 23. Rate of Change — momentum health and exhaustion detection (max 8, -6 parabolic penalty)
+    if roc5_1h > 0 and roc20_1h > 0 and tv_rating > 0:
+        long_score += 8; long_reasons.append("ROC momentum building: 5h=%.1f%% 20h=%.1f%%" % (roc5_1h, roc20_1h))
+    if roc5_1h < 0 and roc20_1h < 0 and tv_rating < 0:
+        short_score += 8; short_reasons.append("ROC downside momentum: 5h=%.1f%%" % roc5_1h)
+    if roc5_1h > 8 and tv_rating > 0:
+        long_score -= 6   # parabolic 5h move = snap-back risk
+    if roc5_1h < -8 and tv_rating < 0:
+        short_score -= 6  # oversold extreme = bounce risk for short entry
+
+    # 24. Price Z-score — chasing guard and sweet-spot bonus (max 5, -10 extreme penalty)
+    if 1.0 < price_z < 2.0 and tv_rating > 0:
+        long_score += 5; long_reasons.append("Price in trend sweet-spot Z=%.2f (not extended)" % price_z)
+    if -2.0 < price_z < -1.0 and tv_rating < 0:
+        short_score += 5; short_reasons.append("Price declining in range Z=%.2f" % price_z)
+    if price_z > 2.5 and tv_rating > 0:
+        long_score -= 10  # chasing a statistically extreme up-move
+    if price_z < -2.5 and tv_rating < 0:
+        short_score -= 10  # shorting a statistically extreme down-move = snap-back risk
+
+    # 25. VWAP position — institutional price anchor (max 5, -5 if too extended)
+    if vwap > 0:
+        vwap_dev = (price - vwap) / vwap * 100
+        if price > vwap and tv_rating > 0:
+            long_score += 5; long_reasons.append("Price above VWAP — institutional consensus bullish")
+        elif price < vwap and tv_rating < 0:
+            short_score += 5; short_reasons.append("Price below VWAP — institutional consensus bearish")
+        if vwap_dev > 3.0 and tv_rating > 0:
+            long_score -= 5   # chasing 3%+ above VWAP = mean-reversion risk
+        if vwap_dev < -3.0 and tv_rating < 0:
+            short_score -= 5
+
+    # 26. ETH/BTC ratio — altseason filter for non-BTC/ETH pairs (max 8, -8 headwind)
+    if symbol not in ("BTCUSDT", "ETHUSDT"):
+        if eth_btc == "BULL" and tv_rating > 0:
+            long_score += 8; long_reasons.append("ETH/BTC rising — altseason conditions favoured")
+        elif eth_btc == "BEAR" and tv_rating > 0:
+            long_score -= 8  # ETH underperforming = capital rotating to BTC, headwind for alts
+        if eth_btc == "BEAR" and tv_rating < 0:
+            short_score += 5; short_reasons.append("ETH/BTC declining — capital leaving altcoins")
+
+    # 27. Williams %R from TV screener (max 6)
+    if wr_val < -80 and tv_rating > 0:
+        long_score += 6; long_reasons.append("Williams %%R oversold (%.1f)" % wr_val)
+    elif wr_val < -60 and tv_rating > 0:
+        long_score += 3
+    if wr_val > -20 and tv_rating < 0:
+        short_score += 6; short_reasons.append("Williams %%R overbought (%.1f)" % wr_val)
+    elif wr_val > -40 and tv_rating < 0:
+        short_score += 3
+
+    # 28. CCI from TV screener (max 6)
+    if cci_val < -100 and tv_rating > 0:
+        long_score += 6; long_reasons.append("CCI oversold (%.1f)" % cci_val)
+    elif cci_val < -50 and tv_rating > 0:
+        long_score += 3
+    if cci_val > 100 and tv_rating < 0:
+        short_score += 6; short_reasons.append("CCI overbought (%.1f)" % cci_val)
+    elif cci_val > 50 and tv_rating < 0:
+        short_score += 3
+
+    # 29. Volume Profile — POC / VAH / VAL structural context (max 8)
+    if poc_4h > 0:
+        near_poc = abs(price - poc_4h) / poc_4h
+        if near_poc < 0.005:
+            if tv_rating > 0:
+                long_score += 5; long_reasons.append("Price at 4h POC — high-volume support zone")
+            else:
+                short_score += 5; short_reasons.append("Price at 4h POC — distribution zone")
+        if val_4h > 0 and price < val_4h and tv_rating > 0:
+            long_score += 8; long_reasons.append("Price below 4h Value Area Low — deeply oversold zone")
+        if vah_4h > 0 and price > vah_4h and tv_rating > 0:
+            long_score -= 5  # above Value Area High = extended, mean-reversion risk
+        if val_4h < price < vah_4h and tv_rating > 0:
+            long_score += 3  # inside Value Area = accepted price, trend continuation likely
+
+    # 30. Deribit DVOL gate + context (hard gate >90, soft penalty >70, bonus <35)
+    if dvol_val > 90:
+        return None   # extreme IV: TA is random in this environment, all signals unreliable
+    elif dvol_val > 70:
+        long_score  -= 8   # elevated uncertainty: reduce conviction
+        short_score -= 8
+    elif dvol_val < 35:
+        long_score  += 5; long_reasons.append("DVOL %.1f — calm IV, trend continuation likely" % dvol_val)
+        short_score += 5; short_reasons.append("DVOL %.1f — directional follow-through environment" % dvol_val)
+    elif dvol_val < 50:
+        long_score  += 3
+        short_score += 3
+
+    # 31. DXY macro filter — USD strength vs crypto tailwind/headwind (max 5)
+    if dxy_rt <= -0.3 and tv_rating > 0:
+        long_score += 5; long_reasons.append("DXY bearish (%.2f) — weak USD = crypto tailwind" % dxy_rt)
+    elif dxy_rt >= 0.5 and tv_rating > 0 and symbol in ("BTCUSDT", "ETHUSDT"):
+        long_score -= 5   # strong dollar headwind for major crypto
+    if dxy_rt >= 0.3 and tv_rating < 0 and symbol in ("BTCUSDT", "ETHUSDT"):
+        short_score += 3; short_reasons.append("DXY bullish (%.2f) — strong USD headwind for crypto" % dxy_rt)
+
+    # ── Crowding gate (L/S ratio) ─────────────────────────────────────────────
+    if ls_ratio > 2.2 and long_score > short_score:
+        return None  # retail overcrowded long — historically reverses hard
+    if ls_ratio < 0.45 and short_score > long_score:
+        return None  # overcrowded short — squeeze risk kills short setups
+
     # ── Normalise to 100 ────────────────────────────────────────────────────────
-    # 155 = realistic max for a strong signal without rare events (BB squeeze /
-    # liquidity sweep). Calibrated so a typical strong signal scores ~80% raw,
-    # guaranteeing every sent signal passes the 80% threshold. Scores above 155
-    # are capped at 100 by min(..., 100).
-    max_pts = 155
+    # max_pts = 220: calibrated for the expanded 31-section scoring system.
+    # Signals that previously barely passed at 80% now need new confirmations
+    # (CVD, CMF, stoch crossover, BTC macro) to clear the threshold — this is
+    # intentional. Old marginal signals are filtered; old strong signals still pass.
+    # Score gap raised to 12: long must clearly dominate short for a clean direction.
+    max_pts = 220
     long_pct  = min(int(long_score  / max_pts * 100), 100)
     short_pct = min(int(short_score / max_pts * 100), 100)
 
-    if long_pct >= MIN_SCORE and long_pct > short_pct + 8:
+    if long_pct >= MIN_SCORE and long_pct > short_pct + 12:
         direction  = "LONG"
         final      = long_pct
-        reasons    = long_reasons[:8]
-    elif short_pct >= MIN_SCORE and short_pct > long_pct + 8:
+        reasons    = long_reasons[:10]
+    elif short_pct >= MIN_SCORE and short_pct > long_pct + 12:
         direction  = "SHORT"
         final      = short_pct
-        reasons    = short_reasons[:8]
+        reasons    = short_reasons[:10]
     else:
         return None
 
@@ -1161,7 +1726,7 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
         "leverage":         lev["lev_label"],
         "leverage_max":     lev["leverage"],
         "alloc_pct":        lev["alloc_pct"],
-        "atr_pct":          lev["atr_pct"],
+        "atr_pct_vol":      lev["atr_pct"],
         "sl_pct":           lev["sl_pct"],
         "price":            price,
         "entry":            entry,
@@ -1201,6 +1766,24 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
         "top_trader_ratio": top_trader_ratio,
         "taker_ratio":      taker_ratio,
         "ob_imbalance":     ob_imbalance,
+        "cvd":              cvd,
+        "ls_ratio":         ls_ratio,
+        "atr_regime":       atr_regime,
+        "atr_pct":          atr_pct_val,
+        "stoch_k":          sk,
+        "stoch_d":          sd,
+        "cmf_1h":           cmf_1h,
+        "cmf_4h":           cmf_4h,
+        "roc5_1h":          roc5_1h,
+        "price_z":          price_z,
+        "rsi_z_1h":         rsi_z_1h,
+        "div_4h":           div_4h,
+        "poc_4h":           poc_4h,
+        "btc_4h_trend":     btc_4h,
+        "btc_dom":          btc_dom,
+        "eth_btc_trend":    eth_btc,
+        "dvol":             dvol_val,
+        "regime":           current_regime,
         "reasons":          reasons,
     }
 
@@ -1697,7 +2280,7 @@ async def main():
             "Target Win Rate: 78-83%%\n\n"
             "CRYPTO (Bybit + Binance + OKX):\n"
             "  - All 3 exchanges scanned + deduplicated\n"
-            "  - 17 scoring sections + 6 hard gates\n"
+            "  - 31 scoring sections + 9 hard gates\n"
             "  - Real top-trader + taker ratios\n"
             "  - Cross-exchange RSI/EMA confirmation\n"
             "  - ATR Entry / SL / TP + leverage calc\n\n"
@@ -1739,8 +2322,13 @@ async def main():
             continue
 
         market = {
-            "fear_greed": fetch_fear_greed(),
-            "btc_chg":    fetch_btc_change(),
+            "fear_greed":    fetch_fear_greed(),
+            "btc_chg":       fetch_btc_change(),
+            "btc_4h_trend":  fetch_btc_4h_trend(),
+            "btc_dom":       fetch_btc_dominance(),
+            "eth_btc_trend": fetch_eth_btc_trend(),
+            "dvol":          fetch_dvol(),
+            "dxy_rating":    fetch_dxy_signal(),
         }
         log.info("Market: FGI=%d  BTC=%+.2f%%" % (market["fear_greed"], market["btc_chg"]))
 
@@ -1779,7 +2367,9 @@ async def main():
                     k1d      = fetch_klines(symbol, "1d",  250); time.sleep(0.15)
                     funding  = fetch_funding_rate(symbol);       time.sleep(0.10)
                     oi_chg   = fetch_oi_change(symbol);          time.sleep(0.10)
-                    ob_imbal = fetch_order_book_imbalance(symbol); time.sleep(0.10)
+                    ob_t1, ob_t2, ob_t3 = fetch_layered_ob_imbalance(symbol); time.sleep(0.10)
+                    cvd      = fetch_cvd(symbol);                time.sleep(0.10)
+                    ls_r     = fetch_ls_ratio(symbol);           time.sleep(0.10)
 
                     if not k1h or not k4h:
                         continue
@@ -1794,7 +2384,9 @@ async def main():
                         oi_chg=oi_chg,
                         top_trader_ratio=fetch_top_trader_ratio(symbol),
                         taker_ratio=fetch_taker_ratio(symbol),
-                        ob_imbalance=ob_imbal,
+                        ob_imbalance=ob_t1,
+                        cvd=cvd,
+                        ls_ratio=ls_r,
                     )
 
                     if result:

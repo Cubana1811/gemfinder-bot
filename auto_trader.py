@@ -44,10 +44,12 @@ from telegram import Bot
 from tradingview_scanner import (
     tv_scan_multi_exchange, score_setup, parse_klines,
     fetch_klines, fetch_klines_bnb, fetch_klines_okx,
-    fetch_funding_rate, fetch_oi_change, fetch_order_book_imbalance,
+    fetch_funding_rate, fetch_oi_change,
     fetch_top_trader_ratio, fetch_taker_ratio, exchange_confirms,
     is_active_session, btc_is_spiking, btc_is_ranging,
     fetch_fear_greed, fetch_btc_change,
+    fetch_btc_dominance, fetch_btc_4h_trend, fetch_ls_ratio, fetch_cvd,
+    fetch_eth_btc_trend, fetch_dvol, fetch_layered_ob_imbalance, fetch_dxy_signal,
     MIN_SCORE, SIGNAL_COOLDOWN, SCAN_INTERVAL,
 )
 
@@ -91,6 +93,52 @@ HEARTBEAT_HOURS     = 12    # send alive ping every N hours
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
+# ── Circuit Breaker ────────────────────────────────────────────────────────────
+
+class CircuitBreaker:
+    """Pause new entries after too many consecutive losses or a session drawdown breach."""
+    def __init__(self, max_consecutive=4, daily_loss_pct=3.0, cooldown_hours=4):
+        self.max_consecutive = max_consecutive
+        self.daily_loss_pct  = daily_loss_pct
+        self.cooldown_hours  = cooldown_hours
+        self._consec         = 0
+        self._daily_pnl      = 0.0
+        self._paused_until   = None
+        self._pause_reason   = ""
+
+    def record(self, pnl: float, balance: float):
+        self._daily_pnl += pnl
+        if pnl < 0:
+            self._consec += 1
+        else:
+            self._consec = 0
+        trigger = (self._consec >= self.max_consecutive or
+                   (balance > 0 and self._daily_pnl / balance * 100 <= -self.daily_loss_pct))
+        if trigger and not self._paused_until:
+            self._paused_until = datetime.now(timezone.utc) + timedelta(hours=self.cooldown_hours)
+            self._pause_reason = ("%d consecutive losses" % self._consec
+                                  if self._consec >= self.max_consecutive
+                                  else "%.1f%% daily drawdown" % (self._daily_pnl / balance * 100))
+            log.warning("Circuit breaker triggered: %s — pausing %dh" % (
+                self._pause_reason, self.cooldown_hours))
+
+    def is_paused(self) -> bool:
+        if self._paused_until and datetime.now(timezone.utc) < self._paused_until:
+            return True
+        if self._paused_until and datetime.now(timezone.utc) >= self._paused_until:
+            self._paused_until = None
+            self._consec       = 0
+            self._daily_pnl    = 0.0
+            log.info("Circuit breaker reset — trading resumed")
+        return False
+
+    def reset_daily(self):
+        self._daily_pnl = 0.0
+
+    @property
+    def pause_reason(self):
+        return self._pause_reason
+
 # ── Global State ───────────────────────────────────────────────────────────────
 trading_active        = True
 open_positions        = {}    # symbol → PaperPosition or live dict
@@ -108,6 +156,7 @@ last_weekly_report    = ""    # ISO week key of last sent report
 last_monthly_report   = ""    # YYYY-MM key of last sent monthly report
 last_daily_report     = ""    # YYYY-MM-DD key of last sent daily report
 bot_start_time        = datetime.now(timezone.utc)
+circuit_breaker       = CircuitBreaker(max_consecutive=4, daily_loss_pct=3.0, cooldown_hours=4)
 
 # ── Bybit V5 Authenticated API ─────────────────────────────────────────────────
 
@@ -319,6 +368,7 @@ def check_reset_daily():
     today = str(date.today())
     if daily_stats["date"] != today:
         daily_stats = {"date": today, "pnl": 0.0, "wins": 0, "losses": 0, "trades": 0}
+        circuit_breaker.reset_daily()
 
 def current_week_key() -> str:
     d = date.today()
@@ -523,6 +573,9 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
 
     if not trading_active:
         return False
+    if circuit_breaker.is_paused():
+        log.info("Circuit breaker active (%s) — skipping %s" % (circuit_breaker.pause_reason, symbol))
+        return False
     if symbol in open_positions:
         return False
     if len(open_positions) >= MAX_POSITIONS:
@@ -542,7 +595,9 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
         log.info("News blackout active — skipping %s" % symbol)
         return False
 
-    # Complete — Max drawdown from peak
+    # Complete — Max drawdown from peak (update peak for both paper and live modes)
+    if balance > peak_balance:
+        peak_balance = balance
     if peak_balance > 0 and (peak_balance - balance) / peak_balance * 100 >= PEAK_DRAWDOWN_LIMIT:
         await bot.send_message(chat_id=CHAT_ID, text=(
             "[AUTO-TRADER] Peak drawdown limit hit (%.1f%% from $%.2f).\n"
@@ -559,18 +614,6 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
             "Trading paused until Monday.\nUse /resume to override.\n"
             "Days remaining this week: %d" % (WEEKLY_LOSS_LIMIT, days_left)))
         trading_active = False
-        return False
-
-    # Stage 3 — Portfolio heat: total risk across all positions
-    eff_risk     = effective_risk_pct()
-    current_heat = sum(
-        getattr(p, "risk_pct_used", RISK_PCT) if isinstance(p, PaperPosition)
-        else p.get("risk_pct_used", RISK_PCT)
-        for p in open_positions.values()
-    )
-    if current_heat + eff_risk > PORTFOLIO_HEAT_MAX:
-        log.info("Portfolio heat %.1f%% + %.1f%% > %.1f%% — skipping %s" % (
-            current_heat, eff_risk, PORTFOLIO_HEAT_MAX, symbol))
         return False
 
     # Stage 2 — Slippage guard: current price must be close to signal entry
@@ -617,6 +660,32 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
             return False
     except Exception:
         pass
+
+    # ── Dynamic position sizing modifiers ─────────────────────────────────────
+    eff_risk  = effective_risk_pct()
+    size_mult = 1.0
+    # Weekend liquidity reduction (lower volume = wider slippage, weaker signals)
+    weekday = datetime.now(timezone.utc).weekday()   # 5=Sat, 6=Sun
+    if weekday >= 5:
+        size_mult *= 0.5
+    # Score-tiered sizing: reward high-conviction signals, reduce marginal ones
+    if score >= 92:
+        size_mult *= 1.25
+    elif score < 83:
+        size_mult *= 0.75
+    eff_risk = eff_risk * size_mult
+
+    # Stage 3 — Portfolio heat check runs after size multipliers so the real
+    # capital consumption is compared against the cap (not the pre-multiplier value)
+    current_heat = sum(
+        getattr(p, "risk_pct_used", RISK_PCT) if isinstance(p, PaperPosition)
+        else p.get("risk_pct_used", RISK_PCT)
+        for p in open_positions.values()
+    )
+    if current_heat + eff_risk > PORTFOLIO_HEAT_MAX:
+        log.info("Portfolio heat %.1f%% + %.1f%% > %.1f%% — skipping %s" % (
+            current_heat, eff_risk, PORTFOLIO_HEAT_MAX, symbol))
+        return False
 
     # Complete — Compound mode: use current balance or fixed starting balance
     sizing_balance = balance if COMPOUND_MODE else float(PAPER_START_BAL)
@@ -727,7 +796,7 @@ async def monitor_positions(bot: Bot):
     Paper mode: poll price every 30s and simulate TP/SL hits.
     Live mode:  check if Bybit still shows the position open.
     """
-    global paper_balance, peak_balance, daily_stats, total_stats, last_loss_time, consecutive_losses, weekly_stats, monthly_stats, last_monthly_report
+    global paper_balance, peak_balance, daily_stats, total_stats, last_loss_time, consecutive_losses, weekly_stats, monthly_stats
 
     while True:
         await asyncio.sleep(30)
@@ -891,6 +960,7 @@ async def monitor_positions(bot: Bot):
                         label = "STOPPED OUT"
                         if consecutive_losses >= LOSS_STREAK_REDUCE:
                             label += " (size halved next trade)"
+                    circuit_breaker.record(pnl, paper_balance)
                     open_positions.pop(symbol, None)
                     save_positions()
                     save_stats()
@@ -948,6 +1018,7 @@ async def monitor_positions(bot: Bot):
                             monthly_stats["losses"] = monthly_stats.get("losses", 0) + 1
                             consecutive_losses += 1
                             last_loss_time = time.time()
+                        circuit_breaker.record(pnl, paper_balance)
                         open_positions.pop(symbol, None)
                         save_positions()
                         save_stats()
@@ -1329,8 +1400,13 @@ async def trading_loop(bot: Bot):
         log.info("Scan #%d starting..." % scan_count)
 
         market = {
-            "fear_greed": fetch_fear_greed(),
-            "btc_chg":    fetch_btc_change(),
+            "fear_greed":    fetch_fear_greed(),
+            "btc_chg":       fetch_btc_change(),
+            "btc_4h_trend":  fetch_btc_4h_trend(),
+            "btc_dom":       fetch_btc_dominance(),
+            "eth_btc_trend": fetch_eth_btc_trend(),
+            "dvol":          fetch_dvol(),
+            "dxy_rating":    fetch_dxy_signal(),
         }
 
         try:
@@ -1349,12 +1425,16 @@ async def trading_loop(bot: Bot):
                     continue
 
                 try:
-                    k1h     = fetch_klines(symbol, "1h", 200);      await asyncio.sleep(0.15)
-                    k4h     = fetch_klines(symbol, "4h", 250);      await asyncio.sleep(0.15)
-                    k1d     = fetch_klines(symbol, "1d", 250);      await asyncio.sleep(0.15)
-                    funding = fetch_funding_rate(symbol);            await asyncio.sleep(0.10)
-                    oi_chg  = fetch_oi_change(symbol);              await asyncio.sleep(0.10)
-                    ob      = fetch_order_book_imbalance(symbol);   await asyncio.sleep(0.10)
+                    k1h     = fetch_klines(symbol, "1h", 200);         await asyncio.sleep(0.15)
+                    k4h     = fetch_klines(symbol, "4h", 250);         await asyncio.sleep(0.15)
+                    k1d     = fetch_klines(symbol, "1d", 250);         await asyncio.sleep(0.15)
+                    funding = fetch_funding_rate(symbol);               await asyncio.sleep(0.10)
+                    oi_chg  = fetch_oi_change(symbol);                 await asyncio.sleep(0.10)
+                    ob_t1, ob_t2, ob_t3 = fetch_layered_ob_imbalance(symbol); await asyncio.sleep(0.10)
+                    ob      = ob_t1  # tier1 ratio kept for backward-compat scoring
+                    cvd     = fetch_cvd(symbol);                       await asyncio.sleep(0.10)
+                    # Binance L/S ratio uses base symbol only (e.g. BTCUSDT not BTCUSDT.P)
+                    ls_r    = fetch_ls_ratio(symbol);                  await asyncio.sleep(0.10)
 
                     if not k1h or not k4h:
                         continue
@@ -1369,6 +1449,8 @@ async def trading_loop(bot: Bot):
                         top_trader_ratio=fetch_top_trader_ratio(symbol),
                         taker_ratio=fetch_taker_ratio(symbol),
                         ob_imbalance=ob,
+                        cvd=cvd,
+                        ls_ratio=ls_r,
                     )
 
                     if result:
