@@ -312,8 +312,10 @@ def calc_qty(balance: float, entry: float, sl: float, leverage: int,
     Also capped so margin used never exceeds 25% of balance.
     """
     risk_usd    = balance * (risk_pct if risk_pct is not None else RISK_PCT) / 100
+    if entry == 0:
+        return 0.0
     sl_dist     = abs(entry - sl) / entry
-    if sl_dist == 0 or entry == 0:
+    if sl_dist == 0:
         return 0.0
     notional    = risk_usd / sl_dist
     qty         = notional / entry
@@ -801,6 +803,7 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
         "qty": qty, "qty1": qty1, "qty2": qty2, "qty3": qty3,
         "leverage": leverage, "tp1_hit": False, "tp2_hit": False,
         "breakeven": False, "opened_at": datetime.now(timezone.utc),
+        "opened_at_ms": int(datetime.now(timezone.utc).timestamp() * 1000),
         "risk_pct_used": eff_risk,
     }
     daily_stats["trades"] += 1
@@ -991,8 +994,8 @@ async def monitor_positions(bot: Bot):
                     monthly_stats["trades"] = monthly_stats.get("trades", 0) + 1
                     size_note = "  Size was reduced (loss streak)" if consecutive_losses >= LOSS_STREAK_REDUCE else ""
                     consecutive_losses    = 0   # win resets streak
+                    open_positions.pop(symbol, None)   # pop first so paper_equity() doesn't double-count margin
                     circuit_breaker.record(pnl, paper_equity())
-                    open_positions.pop(symbol, None)
                     save_positions()
                     save_stats()
                     await bot.send_message(chat_id=CHAT_ID, text=(
@@ -1034,8 +1037,8 @@ async def monitor_positions(bot: Bot):
                         label = "STOPPED OUT"
                         if consecutive_losses >= LOSS_STREAK_REDUCE:
                             label += " (size halved next trade)"
+                    open_positions.pop(symbol, None)   # pop first so paper_equity() doesn't double-count margin
                     circuit_breaker.record(pnl, paper_equity())
-                    open_positions.pop(symbol, None)
                     save_positions()
                     save_stats()
                     await bot.send_message(chat_id=CHAT_ID, text=(
@@ -1092,8 +1095,8 @@ async def monitor_positions(bot: Bot):
                             monthly_stats["losses"] = monthly_stats.get("losses", 0) + 1
                             consecutive_losses += 1
                             last_loss_time = time.time()
+                        open_positions.pop(symbol, None)   # pop first so paper_equity() doesn't double-count margin
                         circuit_breaker.record(pnl, paper_equity())
-                        open_positions.pop(symbol, None)
                         save_positions()
                         save_stats()
                         await bot.send_message(chat_id=CHAT_ID, text=(
