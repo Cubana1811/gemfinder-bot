@@ -545,7 +545,7 @@ def fetch_ls_ratio(symbol: str) -> float:
     data = safe_get("%s/futures/data/globalLongShortAccountRatio?symbol=%s&period=1h&limit=3" % (
         BINANCE_BASE, symbol))
     if data and isinstance(data, list) and data:
-        return float(data[0].get("longShortRatio", 1.0))
+        return float(data[-1].get("longShortRatio", 1.0))
     return 1.0
 
 def fetch_cvd(symbol: str, limit: int = 200) -> float:

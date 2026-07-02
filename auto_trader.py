@@ -859,7 +859,7 @@ async def monitor_positions(bot: Bot):
                                 monthly_stats["losses"] = monthly_stats.get("losses", 0) + 1
                                 consecutive_losses += 1
                                 last_loss_time = time.time()
-                            circuit_breaker.record(cpnl, balance)
+                            circuit_breaker.record(cpnl, get_balance())
                             open_positions.pop(symbol, None)
                             save_positions()
                             save_stats()
