@@ -2275,7 +2275,7 @@ async def main():
         chat_id=CHAT_ID,
         text=(
             "TradingView Trade Setup Scanner v5 Online!\n\n"
-            "Asset Classes: Crypto + Forex + US Stocks\n"
+            "Asset Class: Crypto only\n"
             "Source: TradingView + Bybit + Binance + OKX\n"
             "Target Win Rate: 78-83%%\n\n"
             "CRYPTO (Bybit + Binance + OKX):\n"
@@ -2284,21 +2284,14 @@ async def main():
             "  - Real top-trader + taker ratios\n"
             "  - Cross-exchange RSI/EMA confirmation\n"
             "  - ATR Entry / SL / TP + leverage calc\n\n"
-            "FOREX (TradingView):\n"
-            "  - Major + minor FX pairs\n"
-            "  - 11 scoring sections (RSI, MACD, EMA,\n"
-            "    Stoch, ADX, CCI, W%%R, momentum)\n"
-            "  - ATR-based Entry / SL / TP\n\n"
-            "US STOCKS (NYSE + NASDAQ):\n"
-            "  - High-volume stocks >$5 and >5M vol\n"
-            "  - Same 11-section TV scoring as forex\n"
-            "  - Only scans during market hours\n"
-            "  - (09:30-16:00 ET = 13:30-20:00 UTC)\n\n"
-            "6 Hard Gates (crypto — auto-reject on fail):\n"
-            "  - Daily EMA 200 (no counter-trend)\n"
+            "9 Hard Gates (auto-reject on fail):\n"
+            "  - Market regime (no counter-trend)\n"
             "  - ADX > 20 (trending markets only)\n"
-            "  - Candle structure (2/3 closes align)\n"
-            "  - Funding rate (< +-0.05%% gate)\n"
+            "  - ATR regime (no low/extreme vol)\n"
+            "  - OI divergence (fake breakout filter)\n"
+            "  - Compound F x OI (liquidation risk)\n"
+            "  - L/S ratio crowding gate\n"
+            "  - DVOL > 90 (TA breakdown)\n"
             "  - London/NY session only (08-22 UTC)\n"
             "  - BTC spike pause (>2%% on 15m)\n\n"
             "Min Score: %d/100  |  Min R/R: %.1fx\n"
@@ -2455,82 +2448,7 @@ async def main():
         except Exception as e:
             log.error("Scan error: %s" % e)
 
-        # ── Forex scan ────────────────────────────────────────────────────────
-        try:
-            fx_candidates = tv_scan_forex(filter_side="both", limit=30)
-            log.info("TradingView forex returned %d candidates" % len(fx_candidates))
-
-            fx_candidates.sort(key=lambda x: abs(x["tv_rating"]), reverse=True)
-            fx_sent = 0
-
-            for tv in fx_candidates:
-                if fx_sent >= 2:
-                    break
-
-                sym  = tv["symbol"]
-                last = seen_signals.get("FX_" + sym, 0)
-                if time.time() - last < SIGNAL_COOLDOWN:
-                    continue
-
-                result = score_setup_tv_only(tv, market)
-                if result:
-                    msg = build_message_forex(result)
-                    await bot.send_message(
-                        chat_id=CHAT_ID,
-                        text=msg,
-                        disable_web_page_preview=True,
-                    )
-                    seen_signals["FX_" + sym] = time.time()
-                    fx_sent += 1
-                    log.info("Forex signal: %s %s score=%d" % (
-                        sym, result["direction"], result["score"]))
-                    await asyncio.sleep(2)
-
-            if fx_sent == 0:
-                log.info("No qualifying forex setups this scan.")
-
-        except Exception as e:
-            log.error("Forex scan error: %s" % e)
-
-        # ── US Stocks scan (market hours only: 13:30-20:00 UTC) ───────────────
-        if is_us_market_open():
-            try:
-                st_candidates = tv_scan_stocks(filter_side="both", limit=30)
-                log.info("TradingView stocks returned %d candidates" % len(st_candidates))
-
-                st_candidates.sort(key=lambda x: abs(x["tv_rating"]), reverse=True)
-                st_sent = 0
-
-                for tv in st_candidates:
-                    if st_sent >= 2:
-                        break
-
-                    sym  = tv["symbol"]
-                    last = seen_signals.get("ST_" + sym, 0)
-                    if time.time() - last < SIGNAL_COOLDOWN:
-                        continue
-
-                    result = score_setup_tv_only(tv, market)
-                    if result:
-                        msg = build_message_forex(result)
-                        await bot.send_message(
-                            chat_id=CHAT_ID,
-                            text=msg,
-                            disable_web_page_preview=True,
-                        )
-                        seen_signals["ST_" + sym] = time.time()
-                        st_sent += 1
-                        log.info("Stock signal: %s %s score=%d" % (
-                            sym, result["direction"], result["score"]))
-                        await asyncio.sleep(2)
-
-                if st_sent == 0:
-                    log.info("No qualifying stock setups this scan.")
-
-            except Exception as e:
-                log.error("Stocks scan error: %s" % e)
-        else:
-            log.info("US market closed — skipping stocks scan.")
+        # Forex and stocks signals disabled — crypto only
 
         log.info("Next scan in %ds..." % SCAN_INTERVAL)
         await asyncio.sleep(SCAN_INTERVAL)
