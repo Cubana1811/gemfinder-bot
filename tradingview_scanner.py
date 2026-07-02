@@ -818,16 +818,26 @@ def load_regime() -> dict:
 
 def fetch_dxy_signal() -> float:
     """
-    Fetch DXY (US Dollar Index) TradingView rating via the forex screener.
-    Positive = USD strengthening (crypto headwind). Negative = USD weakening (crypto tailwind).
-    Returns 0.0 (neutral) on failure or if DXY not in results.
+    Fetch DXY (US Dollar Index) TradingView rating via a direct screener query.
+    Bypasses tv_scan_forex's len<6 symbol filter that drops 3-char 'DXY'.
+    Positive = USD strengthening (crypto headwind). Negative = USD weakening.
     """
     try:
-        rows = tv_scan_forex(filter_side="both", limit=50)
-        for r in rows:
-            sym = r.get("symbol", "")
-            if "DXY" in sym or "USDX" in sym:
-                return float(r.get("tv_rating", 0.0))
+        payload = {
+            "columns": ["name", "Recommend.All"],
+            "filter":  [],
+            "markets": ["forex"],
+            "options": {"lang": "en"},
+            "range":   [0, 50],
+            "sort":    {"sortBy": "Recommend.All", "sortOrder": "desc"},
+        }
+        r = requests.post(TV_FOREX_URL, json=payload, headers=TV_HEADERS, timeout=10)
+        if r.status_code == 200:
+            for row in r.json().get("data", []):
+                raw  = row.get("s", "")
+                vals = row.get("d", [])
+                if ("DXY" in raw.upper() or "USDX" in raw.upper()) and len(vals) >= 2:
+                    return float(vals[1]) if vals[1] is not None else 0.0
     except Exception:
         pass
     return 0.0
@@ -1035,7 +1045,7 @@ def find_sr_zones(highs, lows, closes, tolerance=0.006):
         if i in used: continue
         cluster = [lvl]
         for j in range(i + 1, len(levels)):
-            if j not in used and abs(levels[j] - lvl) / lvl <= tolerance:
+            if j not in used and lvl and abs(levels[j] - lvl) / lvl <= tolerance:
                 cluster.append(levels[j])
                 used.add(j)
         if len(cluster) >= 3:                # 3-touch minimum for a real zone
@@ -1539,15 +1549,24 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
         elif btc_dom < 45 and tv_rating > 0:
             long_score += 5; long_reasons.append("BTC dom %.1f%% — altseason conditions" % btc_dom)
 
-    # 21. RSI divergence filter — penalise hidden weakness / hidden strength (max -10 / +5)
+    # 21. RSI divergence filter — 4h (strong signal) + 1h (confirmation)
     if div_4h == "BEARISH_DIV" and tv_rating > 0:
-        long_score -= 10  # price making higher highs but RSI falling = exhaustion
+        long_score -= 10; long_reasons.append("Bearish RSI div 4h — exhaustion warning")
     if div_4h == "BULLISH_DIV" and tv_rating < 0:
-        short_score -= 10  # price making lower lows but RSI rising = selling pressure waning
+        short_score -= 10  # selling pressure waning
     if div_4h == "BULLISH_DIV" and tv_rating > 0:
         long_score += 5; long_reasons.append("Bullish RSI div 4h — hidden buying strength")
     if div_4h == "BEARISH_DIV" and tv_rating < 0:
         short_score += 5; short_reasons.append("Bearish RSI div 4h — hidden selling pressure")
+    # 1h divergence as secondary confirmation (half weight)
+    if div_1h == "BEARISH_DIV" and tv_rating > 0:
+        long_score -= 5
+    if div_1h == "BULLISH_DIV" and tv_rating < 0:
+        short_score -= 5
+    if div_1h == "BULLISH_DIV" and tv_rating > 0:
+        long_score += 3; long_reasons.append("Bullish RSI div 1h — short-term buying signal")
+    if div_1h == "BEARISH_DIV" and tv_rating < 0:
+        short_score += 3; short_reasons.append("Bearish RSI div 1h — short-term selling signal")
 
     # 22. Chaikin Money Flow — volume-weighted direction quality (max 10, -8 divergence)
     if cmf_1h > 0.1 and cmf_4h > 0.1 and tv_rating > 0:
@@ -1635,9 +1654,16 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
         if val_4h > 0 and price < val_4h and tv_rating > 0:
             long_score += 8; long_reasons.append("Price below 4h Value Area Low — deeply oversold zone")
         if vah_4h > 0 and price > vah_4h and tv_rating > 0:
-            long_score -= 5  # above Value Area High = extended, mean-reversion risk
+            long_score -= 5  # above VAH = extended long, mean-reversion risk
         if val_4h < price < vah_4h and tv_rating > 0:
             long_score += 3  # inside Value Area = accepted price, trend continuation likely
+        # Symmetric short branches
+        if vah_4h > 0 and price > vah_4h and tv_rating < 0:
+            short_score += 8; short_reasons.append("Price above 4h Value Area High — deeply overbought zone")
+        if val_4h > 0 and price < val_4h and tv_rating < 0:
+            short_score -= 5  # below VAL = extended short, bounce risk
+        if val_4h < price < vah_4h and tv_rating < 0:
+            short_score += 3  # inside Value Area = accepted price, trend continuation likely
 
     # 30. Deribit DVOL gate + context (hard gate >90, soft penalty >70, bonus <35)
     if dvol_val > 90:
