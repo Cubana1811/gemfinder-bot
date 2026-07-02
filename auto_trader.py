@@ -205,7 +205,9 @@ def get_live_balance() -> float:
         for acct in data["result"]["list"]:
             for coin in acct.get("coin", []):
                 if coin["coin"] == "USDT":
-                    return float(coin.get("availableToWithdraw") or coin.get("walletBalance") or 0)
+                    # Use walletBalance (total equity) not availableToWithdraw (free cash)
+                    # so peak-drawdown compares like-for-like when positions are open
+                    return float(coin.get("walletBalance") or coin.get("availableToWithdraw") or 0)
     return 0.0
 
 def get_balance() -> float:
@@ -387,6 +389,17 @@ def effective_risk_pct() -> float:
         return RISK_PCT * 0.5
     return RISK_PCT
 
+def paper_equity() -> float:
+    """Paper equity = free cash + locked margins across all open positions.
+    Used as circuit-breaker denominator so daily-drawdown % is not inflated
+    by margin consumed by open trades."""
+    locked = sum(
+        p.qty_remaining * p.entry / p.leverage
+        for p in open_positions.values()
+        if isinstance(p, PaperPosition)
+    )
+    return paper_balance + locked
+
 def current_month_key() -> str:
     d = date.today()
     return "%d-%02d" % (d.year, d.month)
@@ -494,19 +507,23 @@ def load_positions():
 def save_stats():
     _ensure_data_dir()
     try:
+        cb_paused = circuit_breaker._paused_until.isoformat() if circuit_breaker._paused_until else None
         with open(os.path.join(DATA_DIR, "stats.json"), "w") as f:
             json.dump({
-                "paper_balance":     paper_balance,
-                "peak_balance":      peak_balance,
-                "daily_stats":       daily_stats,
-                "total_stats":       total_stats,
-                "weekly_stats":      weekly_stats,
-                "monthly_stats":     monthly_stats,
-                "consecutive_losses": consecutive_losses,
-                "last_loss_time":    last_loss_time,
-                "last_weekly_report": last_weekly_report,
-                "last_monthly_report": last_monthly_report,
-                "last_daily_report":  last_daily_report,
+                "paper_balance":        paper_balance,
+                "peak_balance":         peak_balance,
+                "daily_stats":          daily_stats,
+                "total_stats":          total_stats,
+                "weekly_stats":         weekly_stats,
+                "monthly_stats":        monthly_stats,
+                "consecutive_losses":   consecutive_losses,
+                "last_loss_time":       last_loss_time,
+                "last_weekly_report":   last_weekly_report,
+                "last_monthly_report":  last_monthly_report,
+                "last_daily_report":    last_daily_report,
+                "cb_consec":            circuit_breaker._consec,
+                "cb_daily_pnl":         circuit_breaker._daily_pnl,
+                "cb_paused_until":      cb_paused,
             }, f)
     except Exception as e:
         log.error("save_stats error: %s" % e)
@@ -532,6 +549,12 @@ def load_stats():
         last_weekly_report   = d.get("last_weekly_report", "")
         last_monthly_report  = d.get("last_monthly_report", "")
         last_daily_report    = d.get("last_daily_report",  "")
+        circuit_breaker._consec    = d.get("cb_consec",    0)
+        circuit_breaker._daily_pnl = d.get("cb_daily_pnl", 0.0)
+        cb_paused = d.get("cb_paused_until")
+        if cb_paused:
+            from datetime import datetime as _dt
+            circuit_breaker._paused_until = _dt.fromisoformat(cb_paused)
         log.info("Stats restored from disk")
     except Exception as e:
         log.error("load_stats error: %s" % e)
@@ -832,10 +855,14 @@ async def monitor_positions(bot: Bot):
                             # Fetch realized PnL from Bybit closed-pnl endpoint
                             cpnl = 0.0
                             try:
-                                cp = bybit_get("/v5/position/closed-pnl",
-                                               {"category": "linear", "symbol": symbol, "limit": 1})
+                                # Sum all partial fills (TP1+TP2+TP3/SL) since position opened
+                                opened_ms = int(pos.get("opened_at_ms", 0)) if isinstance(pos, dict) else 0
+                                cp = bybit_get("/v5/position/closed-pnl", {
+                                    "category": "linear", "symbol": symbol, "limit": 50,
+                                    **({"startTime": str(opened_ms)} if opened_ms else {})
+                                })
                                 if cp.get("retCode") == 0 and cp["result"]["list"]:
-                                    cpnl = float(cp["result"]["list"][0].get("closedPnl", 0))
+                                    cpnl = sum(float(r.get("closedPnl", 0)) for r in cp["result"]["list"])
                             except Exception:
                                 pass
                             daily_stats["pnl"]   += cpnl
@@ -907,7 +934,7 @@ async def monitor_positions(bot: Bot):
                     total_stats["pnl"] += pnl
                     weekly_stats["pnl"]  = weekly_stats.get("pnl", 0) + pnl
                     monthly_stats["pnl"] = monthly_stats.get("pnl", 0) + pnl
-                    circuit_breaker.record(pnl, paper_balance)
+                    circuit_breaker.record(pnl, paper_equity())
                     save_positions()
                     save_stats()
                     await bot.send_message(chat_id=CHAT_ID, text=(
@@ -933,7 +960,7 @@ async def monitor_positions(bot: Bot):
                     total_stats["pnl"] += pnl
                     weekly_stats["pnl"]  = weekly_stats.get("pnl", 0) + pnl
                     monthly_stats["pnl"] = monthly_stats.get("pnl", 0) + pnl
-                    circuit_breaker.record(pnl, paper_balance)
+                    circuit_breaker.record(pnl, paper_equity())
                     save_positions()
                     save_stats()
                     await bot.send_message(chat_id=CHAT_ID, text=(
@@ -964,7 +991,7 @@ async def monitor_positions(bot: Bot):
                     monthly_stats["trades"] = monthly_stats.get("trades", 0) + 1
                     size_note = "  Size was reduced (loss streak)" if consecutive_losses >= LOSS_STREAK_REDUCE else ""
                     consecutive_losses    = 0   # win resets streak
-                    circuit_breaker.record(pnl, paper_balance)
+                    circuit_breaker.record(pnl, paper_equity())
                     open_positions.pop(symbol, None)
                     save_positions()
                     save_stats()
@@ -1007,7 +1034,7 @@ async def monitor_positions(bot: Bot):
                         label = "STOPPED OUT"
                         if consecutive_losses >= LOSS_STREAK_REDUCE:
                             label += " (size halved next trade)"
-                    circuit_breaker.record(pnl, paper_balance)
+                    circuit_breaker.record(pnl, paper_equity())
                     open_positions.pop(symbol, None)
                     save_positions()
                     save_stats()
@@ -1019,7 +1046,7 @@ async def monitor_positions(bot: Bot):
                     ) % (label, pos.direction, symbol, exit_price, pnl, paper_balance))
 
                 # Stage 2 — Trailing SL: update after TP1 hit on each 30s poll
-                if symbol in open_positions and pos.tp1_hit and not pos.tp2_hit:
+                if symbol in open_positions and pos.tp1_hit:
                     if pos.direction == "LONG":
                         if pos.peak_price is None or price > pos.peak_price:
                             pos.peak_price = price
@@ -1065,7 +1092,7 @@ async def monitor_positions(bot: Bot):
                             monthly_stats["losses"] = monthly_stats.get("losses", 0) + 1
                             consecutive_losses += 1
                             last_loss_time = time.time()
-                        circuit_breaker.record(pnl, paper_balance)
+                        circuit_breaker.record(pnl, paper_equity())
                         open_positions.pop(symbol, None)
                         save_positions()
                         save_stats()
