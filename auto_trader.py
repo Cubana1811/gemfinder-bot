@@ -205,7 +205,9 @@ def get_live_balance() -> float:
         for acct in data["result"]["list"]:
             for coin in acct.get("coin", []):
                 if coin["coin"] == "USDT":
-                    return float(coin.get("availableToWithdraw") or coin.get("walletBalance") or 0)
+                    # Use walletBalance (total equity) not availableToWithdraw (free cash)
+                    # so peak-drawdown compares like-for-like when positions are open
+                    return float(coin.get("walletBalance") or coin.get("availableToWithdraw") or 0)
     return 0.0
 
 def get_balance() -> float:
@@ -310,8 +312,10 @@ def calc_qty(balance: float, entry: float, sl: float, leverage: int,
     Also capped so margin used never exceeds 25% of balance.
     """
     risk_usd    = balance * (risk_pct if risk_pct is not None else RISK_PCT) / 100
+    if entry == 0:
+        return 0.0
     sl_dist     = abs(entry - sl) / entry
-    if sl_dist == 0 or entry == 0:
+    if sl_dist == 0:
         return 0.0
     notional    = risk_usd / sl_dist
     qty         = notional / entry
@@ -386,6 +390,17 @@ def effective_risk_pct() -> float:
     if consecutive_losses >= LOSS_STREAK_REDUCE:
         return RISK_PCT * 0.5
     return RISK_PCT
+
+def paper_equity() -> float:
+    """Paper equity = free cash + locked margins across all open positions.
+    Used as circuit-breaker denominator so daily-drawdown % is not inflated
+    by margin consumed by open trades."""
+    locked = sum(
+        p.qty_remaining * p.entry / p.leverage
+        for p in open_positions.values()
+        if isinstance(p, PaperPosition)
+    )
+    return paper_balance + locked
 
 def current_month_key() -> str:
     d = date.today()
@@ -494,19 +509,23 @@ def load_positions():
 def save_stats():
     _ensure_data_dir()
     try:
+        cb_paused = circuit_breaker._paused_until.isoformat() if circuit_breaker._paused_until else None
         with open(os.path.join(DATA_DIR, "stats.json"), "w") as f:
             json.dump({
-                "paper_balance":     paper_balance,
-                "peak_balance":      peak_balance,
-                "daily_stats":       daily_stats,
-                "total_stats":       total_stats,
-                "weekly_stats":      weekly_stats,
-                "monthly_stats":     monthly_stats,
-                "consecutive_losses": consecutive_losses,
-                "last_loss_time":    last_loss_time,
-                "last_weekly_report": last_weekly_report,
-                "last_monthly_report": last_monthly_report,
-                "last_daily_report":  last_daily_report,
+                "paper_balance":        paper_balance,
+                "peak_balance":         peak_balance,
+                "daily_stats":          daily_stats,
+                "total_stats":          total_stats,
+                "weekly_stats":         weekly_stats,
+                "monthly_stats":        monthly_stats,
+                "consecutive_losses":   consecutive_losses,
+                "last_loss_time":       last_loss_time,
+                "last_weekly_report":   last_weekly_report,
+                "last_monthly_report":  last_monthly_report,
+                "last_daily_report":    last_daily_report,
+                "cb_consec":            circuit_breaker._consec,
+                "cb_daily_pnl":         circuit_breaker._daily_pnl,
+                "cb_paused_until":      cb_paused,
             }, f)
     except Exception as e:
         log.error("save_stats error: %s" % e)
@@ -532,6 +551,12 @@ def load_stats():
         last_weekly_report   = d.get("last_weekly_report", "")
         last_monthly_report  = d.get("last_monthly_report", "")
         last_daily_report    = d.get("last_daily_report",  "")
+        circuit_breaker._consec    = d.get("cb_consec",    0)
+        circuit_breaker._daily_pnl = d.get("cb_daily_pnl", 0.0)
+        cb_paused = d.get("cb_paused_until")
+        if cb_paused:
+            from datetime import datetime as _dt
+            circuit_breaker._paused_until = _dt.fromisoformat(cb_paused)
         log.info("Stats restored from disk")
     except Exception as e:
         log.error("load_stats error: %s" % e)
@@ -595,10 +620,21 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
         log.info("News blackout active — skipping %s" % symbol)
         return False
 
-    # Complete — Max drawdown from peak (update peak for both paper and live modes)
-    if balance > peak_balance:
-        peak_balance = balance
-    if peak_balance > 0 and (peak_balance - balance) / peak_balance * 100 >= PEAK_DRAWDOWN_LIMIT:
+    # Complete — Max drawdown from peak using equity (free cash + locked margins)
+    # Using raw paper_balance understates equity while positions are open and
+    # triggers a false drawdown halt after just 1-2 normal trades.
+    if PAPER_TRADE:
+        locked = sum(
+            (p.qty_remaining * p.entry / p.leverage)
+            for p in open_positions.values()
+            if isinstance(p, PaperPosition)
+        )
+        equity = paper_balance + locked
+    else:
+        equity = balance
+    if equity > peak_balance:
+        peak_balance = equity
+    if peak_balance > 0 and (peak_balance - equity) / peak_balance * 100 >= PEAK_DRAWDOWN_LIMIT:
         await bot.send_message(chat_id=CHAT_ID, text=(
             "[AUTO-TRADER] Peak drawdown limit hit (%.1f%% from $%.2f).\n"
             "Trading paused to protect capital.\nUse /resume to override."
@@ -767,6 +803,7 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
         "qty": qty, "qty1": qty1, "qty2": qty2, "qty3": qty3,
         "leverage": leverage, "tp1_hit": False, "tp2_hit": False,
         "breakeven": False, "opened_at": datetime.now(timezone.utc),
+        "opened_at_ms": int(datetime.now(timezone.utc).timestamp() * 1000),
         "risk_pct_used": eff_risk,
     }
     daily_stats["trades"] += 1
@@ -818,9 +855,46 @@ async def monitor_positions(bot: Bot):
                         positions = data["result"]["list"]
                         size = float(positions[0].get("size", 0)) if positions else 0
                         if size == 0:
+                            # Fetch realized PnL from Bybit closed-pnl endpoint
+                            cpnl = 0.0
+                            try:
+                                # Sum all partial fills (TP1+TP2+TP3/SL) since position opened
+                                opened_ms = int(pos.get("opened_at_ms", 0)) if isinstance(pos, dict) else 0
+                                cp = bybit_get("/v5/position/closed-pnl", {
+                                    "category": "linear", "symbol": symbol, "limit": 50,
+                                    **({"startTime": str(opened_ms)} if opened_ms else {})
+                                })
+                                if cp.get("retCode") == 0 and cp["result"]["list"]:
+                                    cpnl = sum(float(r.get("closedPnl", 0)) for r in cp["result"]["list"])
+                            except Exception:
+                                pass
+                            daily_stats["pnl"]   += cpnl
+                            total_stats["pnl"]   += cpnl
+                            weekly_stats["pnl"]   = weekly_stats.get("pnl", 0) + cpnl
+                            monthly_stats["pnl"]  = monthly_stats.get("pnl", 0) + cpnl
+                            weekly_stats["trades"]  = weekly_stats.get("trades", 0) + 1
+                            monthly_stats["trades"] = monthly_stats.get("trades", 0) + 1
+                            if cpnl >= 0:
+                                daily_stats["wins"]  += 1
+                                total_stats["wins"]  += 1
+                                total_stats["gross_profit"] = total_stats.get("gross_profit", 0.0) + cpnl
+                                weekly_stats["wins"]  = weekly_stats.get("wins", 0) + 1
+                                monthly_stats["wins"] = monthly_stats.get("wins", 0) + 1
+                                consecutive_losses = 0
+                            else:
+                                daily_stats["losses"]  += 1
+                                total_stats["losses"]  += 1
+                                total_stats["gross_loss"] = total_stats.get("gross_loss", 0.0) + abs(cpnl)
+                                weekly_stats["losses"]  = weekly_stats.get("losses", 0) + 1
+                                monthly_stats["losses"] = monthly_stats.get("losses", 0) + 1
+                                consecutive_losses += 1
+                                last_loss_time = time.time()
+                            circuit_breaker.record(cpnl, get_balance())
                             open_positions.pop(symbol, None)
+                            save_positions()
+                            save_stats()
                             await bot.send_message(chat_id=CHAT_ID,
-                                text="[LIVE] Position closed on exchange: %s" % symbol)
+                                text="[LIVE] %s closed\nRealized P&L: $%.2f" % (symbol, cpnl))
                         else:
                             # Move SL to breakeven if TP1 was hit and not yet moved
                             if not pos["tp1_hit"]:
@@ -863,6 +937,7 @@ async def monitor_positions(bot: Bot):
                     total_stats["pnl"] += pnl
                     weekly_stats["pnl"]  = weekly_stats.get("pnl", 0) + pnl
                     monthly_stats["pnl"] = monthly_stats.get("pnl", 0) + pnl
+                    circuit_breaker.record(pnl, paper_equity())
                     save_positions()
                     save_stats()
                     await bot.send_message(chat_id=CHAT_ID, text=(
@@ -888,6 +963,7 @@ async def monitor_positions(bot: Bot):
                     total_stats["pnl"] += pnl
                     weekly_stats["pnl"]  = weekly_stats.get("pnl", 0) + pnl
                     monthly_stats["pnl"] = monthly_stats.get("pnl", 0) + pnl
+                    circuit_breaker.record(pnl, paper_equity())
                     save_positions()
                     save_stats()
                     await bot.send_message(chat_id=CHAT_ID, text=(
@@ -918,7 +994,8 @@ async def monitor_positions(bot: Bot):
                     monthly_stats["trades"] = monthly_stats.get("trades", 0) + 1
                     size_note = "  Size was reduced (loss streak)" if consecutive_losses >= LOSS_STREAK_REDUCE else ""
                     consecutive_losses    = 0   # win resets streak
-                    open_positions.pop(symbol, None)
+                    open_positions.pop(symbol, None)   # pop first so paper_equity() doesn't double-count margin
+                    circuit_breaker.record(pnl, paper_equity())
                     save_positions()
                     save_stats()
                     await bot.send_message(chat_id=CHAT_ID, text=(
@@ -960,8 +1037,8 @@ async def monitor_positions(bot: Bot):
                         label = "STOPPED OUT"
                         if consecutive_losses >= LOSS_STREAK_REDUCE:
                             label += " (size halved next trade)"
-                    circuit_breaker.record(pnl, paper_balance)
-                    open_positions.pop(symbol, None)
+                    open_positions.pop(symbol, None)   # pop first so paper_equity() doesn't double-count margin
+                    circuit_breaker.record(pnl, paper_equity())
                     save_positions()
                     save_stats()
                     await bot.send_message(chat_id=CHAT_ID, text=(
@@ -972,7 +1049,7 @@ async def monitor_positions(bot: Bot):
                     ) % (label, pos.direction, symbol, exit_price, pnl, paper_balance))
 
                 # Stage 2 — Trailing SL: update after TP1 hit on each 30s poll
-                if symbol in open_positions and pos.tp1_hit and not pos.tp2_hit:
+                if symbol in open_positions and pos.tp1_hit:
                     if pos.direction == "LONG":
                         if pos.peak_price is None or price > pos.peak_price:
                             pos.peak_price = price
@@ -1018,8 +1095,8 @@ async def monitor_positions(bot: Bot):
                             monthly_stats["losses"] = monthly_stats.get("losses", 0) + 1
                             consecutive_losses += 1
                             last_loss_time = time.time()
-                        circuit_breaker.record(pnl, paper_balance)
-                        open_positions.pop(symbol, None)
+                        open_positions.pop(symbol, None)   # pop first so paper_equity() doesn't double-count margin
+                        circuit_breaker.record(pnl, paper_equity())
                         save_positions()
                         save_stats()
                         await bot.send_message(chat_id=CHAT_ID, text=(

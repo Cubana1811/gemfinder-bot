@@ -545,7 +545,7 @@ def fetch_ls_ratio(symbol: str) -> float:
     data = safe_get("%s/futures/data/globalLongShortAccountRatio?symbol=%s&period=1h&limit=3" % (
         BINANCE_BASE, symbol))
     if data and isinstance(data, list) and data:
-        return float(data[0].get("longShortRatio", 1.0))
+        return float(data[-1].get("longShortRatio", 1.0))
     return 1.0
 
 def fetch_cvd(symbol: str, limit: int = 200) -> float:
@@ -691,10 +691,19 @@ def fetch_dvol() -> float:
     """
     Deribit Volatility Index (DVOL) for BTC — free public endpoint, no auth required.
     Crypto-native VIX. >90 = extreme uncertainty, TA unreliable. <35 = calm, trend continuation likely.
+    Uses get_volatility_index_data (resolution=3600) — the correct endpoint for DVOL.
     """
-    data = safe_get("https://www.deribit.com/api/v2/public/get_index_price?index_name=dvol_btc")
-    if data and data.get("result"):
-        return float(data["result"].get("index_price", 55.0))
+    import time as _time
+    end_ts   = int(_time.time() * 1000)
+    start_ts = end_ts - 3600000  # 1 hour window
+    data = safe_get(
+        "https://www.deribit.com/api/v2/public/get_volatility_index_data"
+        "?currency=BTC&resolution=3600&start_timestamp=%d&end_timestamp=%d" % (start_ts, end_ts)
+    )
+    if data and data.get("result") and data["result"].get("data"):
+        rows = data["result"]["data"]
+        if rows:
+            return float(rows[-1][4])  # [timestamp, open, high, low, close]
     return 55.0
 
 
@@ -809,16 +818,26 @@ def load_regime() -> dict:
 
 def fetch_dxy_signal() -> float:
     """
-    Fetch DXY (US Dollar Index) TradingView rating via the forex screener.
-    Positive = USD strengthening (crypto headwind). Negative = USD weakening (crypto tailwind).
-    Returns 0.0 (neutral) on failure or if DXY not in results.
+    Fetch DXY (US Dollar Index) TradingView rating via a direct screener query.
+    Bypasses tv_scan_forex's len<6 symbol filter that drops 3-char 'DXY'.
+    Positive = USD strengthening (crypto headwind). Negative = USD weakening.
     """
     try:
-        rows = tv_scan_forex(filter_side="both", limit=50)
-        for r in rows:
-            sym = r.get("symbol", "")
-            if "DXY" in sym or "USDX" in sym:
-                return float(r.get("tv_rating", 0.0))
+        payload = {
+            "columns": ["name", "Recommend.All"],
+            "filter":  [],
+            "markets": ["forex"],
+            "options": {"lang": "en"},
+            "range":   [0, 50],
+            "sort":    {"sortBy": "Recommend.All", "sortOrder": "desc"},
+        }
+        r = requests.post(TV_FOREX_URL, json=payload, headers=TV_HEADERS, timeout=10)
+        if r.status_code == 200:
+            for row in r.json().get("data", []):
+                raw  = row.get("s", "")
+                vals = row.get("d", [])
+                if ("DXY" in raw.upper() or "USDX" in raw.upper()) and len(vals) >= 2:
+                    return float(vals[1]) if vals[1] is not None else 0.0
     except Exception:
         pass
     return 0.0
@@ -1026,7 +1045,7 @@ def find_sr_zones(highs, lows, closes, tolerance=0.006):
         if i in used: continue
         cluster = [lvl]
         for j in range(i + 1, len(levels)):
-            if j not in used and abs(levels[j] - lvl) / lvl <= tolerance:
+            if j not in used and lvl and abs(levels[j] - lvl) / lvl <= tolerance:
                 cluster.append(levels[j])
                 used.add(j)
         if len(cluster) >= 3:                # 3-touch minimum for a real zone
@@ -1530,15 +1549,24 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
         elif btc_dom < 45 and tv_rating > 0:
             long_score += 5; long_reasons.append("BTC dom %.1f%% — altseason conditions" % btc_dom)
 
-    # 21. RSI divergence filter — penalise hidden weakness / hidden strength (max -10 / +5)
+    # 21. RSI divergence filter — 4h (strong signal) + 1h (confirmation)
     if div_4h == "BEARISH_DIV" and tv_rating > 0:
-        long_score -= 10  # price making higher highs but RSI falling = exhaustion
+        long_score -= 10; long_reasons.append("Bearish RSI div 4h — exhaustion warning")
     if div_4h == "BULLISH_DIV" and tv_rating < 0:
-        short_score -= 10  # price making lower lows but RSI rising = selling pressure waning
+        short_score -= 10  # selling pressure waning
     if div_4h == "BULLISH_DIV" and tv_rating > 0:
         long_score += 5; long_reasons.append("Bullish RSI div 4h — hidden buying strength")
     if div_4h == "BEARISH_DIV" and tv_rating < 0:
         short_score += 5; short_reasons.append("Bearish RSI div 4h — hidden selling pressure")
+    # 1h divergence as secondary confirmation (half weight)
+    if div_1h == "BEARISH_DIV" and tv_rating > 0:
+        long_score -= 5
+    if div_1h == "BULLISH_DIV" and tv_rating < 0:
+        short_score -= 5
+    if div_1h == "BULLISH_DIV" and tv_rating > 0:
+        long_score += 3; long_reasons.append("Bullish RSI div 1h — short-term buying signal")
+    if div_1h == "BEARISH_DIV" and tv_rating < 0:
+        short_score += 3; short_reasons.append("Bearish RSI div 1h — short-term selling signal")
 
     # 22. Chaikin Money Flow — volume-weighted direction quality (max 10, -8 divergence)
     if cmf_1h > 0.1 and cmf_4h > 0.1 and tv_rating > 0:
@@ -1626,9 +1654,16 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
         if val_4h > 0 and price < val_4h and tv_rating > 0:
             long_score += 8; long_reasons.append("Price below 4h Value Area Low — deeply oversold zone")
         if vah_4h > 0 and price > vah_4h and tv_rating > 0:
-            long_score -= 5  # above Value Area High = extended, mean-reversion risk
+            long_score -= 5  # above VAH = extended long, mean-reversion risk
         if val_4h < price < vah_4h and tv_rating > 0:
             long_score += 3  # inside Value Area = accepted price, trend continuation likely
+        # Symmetric short branches
+        if vah_4h > 0 and price > vah_4h and tv_rating < 0:
+            short_score += 8; short_reasons.append("Price above 4h Value Area High — deeply overbought zone")
+        if val_4h > 0 and price < val_4h and tv_rating < 0:
+            short_score -= 5  # below VAL = extended short, bounce risk
+        if val_4h < price < vah_4h and tv_rating < 0:
+            short_score += 3  # inside Value Area = accepted price, trend continuation likely
 
     # 30. Deribit DVOL gate + context (hard gate >90, soft penalty >70, bonus <35)
     if dvol_val > 90:
@@ -2130,7 +2165,7 @@ def build_message(s):
         fp(s["tp3"]),  tp_sign, tp3_pct,
         s["rr"],
         s["leverage"],
-        s["leverage_max"], s["atr_pct"],
+        s["leverage_max"], s["atr_pct_vol"],
         s["alloc_pct"],
         s["sl_pct"],
         1000 * s["alloc_pct"] / 100, s["leverage_max"],
@@ -2275,7 +2310,7 @@ async def main():
         chat_id=CHAT_ID,
         text=(
             "TradingView Trade Setup Scanner v5 Online!\n\n"
-            "Asset Classes: Crypto + Forex + US Stocks\n"
+            "Asset Class: Crypto only\n"
             "Source: TradingView + Bybit + Binance + OKX\n"
             "Target Win Rate: 78-83%%\n\n"
             "CRYPTO (Bybit + Binance + OKX):\n"
@@ -2284,21 +2319,14 @@ async def main():
             "  - Real top-trader + taker ratios\n"
             "  - Cross-exchange RSI/EMA confirmation\n"
             "  - ATR Entry / SL / TP + leverage calc\n\n"
-            "FOREX (TradingView):\n"
-            "  - Major + minor FX pairs\n"
-            "  - 11 scoring sections (RSI, MACD, EMA,\n"
-            "    Stoch, ADX, CCI, W%%R, momentum)\n"
-            "  - ATR-based Entry / SL / TP\n\n"
-            "US STOCKS (NYSE + NASDAQ):\n"
-            "  - High-volume stocks >$5 and >5M vol\n"
-            "  - Same 11-section TV scoring as forex\n"
-            "  - Only scans during market hours\n"
-            "  - (09:30-16:00 ET = 13:30-20:00 UTC)\n\n"
-            "6 Hard Gates (crypto — auto-reject on fail):\n"
-            "  - Daily EMA 200 (no counter-trend)\n"
+            "9 Hard Gates (auto-reject on fail):\n"
+            "  - Market regime (no counter-trend)\n"
             "  - ADX > 20 (trending markets only)\n"
-            "  - Candle structure (2/3 closes align)\n"
-            "  - Funding rate (< +-0.05%% gate)\n"
+            "  - ATR regime (no low/extreme vol)\n"
+            "  - OI divergence (fake breakout filter)\n"
+            "  - Compound F x OI (liquidation risk)\n"
+            "  - L/S ratio crowding gate\n"
+            "  - DVOL > 90 (TA breakdown)\n"
             "  - London/NY session only (08-22 UTC)\n"
             "  - BTC spike pause (>2%% on 15m)\n\n"
             "Min Score: %d/100  |  Min R/R: %.1fx\n"
@@ -2404,7 +2432,7 @@ async def main():
                         avg_funding = sum(valid_fundings) / len(valid_fundings) if valid_fundings else funding
 
                         # Average order book imbalance (Bybit + Binance)
-                        avg_ob = (ob_imbal + ob_bnb) / 2 if ob_bnb != 1.0 else ob_imbal
+                        avg_ob = (ob_t1 + ob_bnb) / 2 if ob_bnb != 1.0 else ob_t1
 
                         # Count exchange confirmations
                         exchanges = ["Bybit"]
@@ -2455,82 +2483,7 @@ async def main():
         except Exception as e:
             log.error("Scan error: %s" % e)
 
-        # ── Forex scan ────────────────────────────────────────────────────────
-        try:
-            fx_candidates = tv_scan_forex(filter_side="both", limit=30)
-            log.info("TradingView forex returned %d candidates" % len(fx_candidates))
-
-            fx_candidates.sort(key=lambda x: abs(x["tv_rating"]), reverse=True)
-            fx_sent = 0
-
-            for tv in fx_candidates:
-                if fx_sent >= 2:
-                    break
-
-                sym  = tv["symbol"]
-                last = seen_signals.get("FX_" + sym, 0)
-                if time.time() - last < SIGNAL_COOLDOWN:
-                    continue
-
-                result = score_setup_tv_only(tv, market)
-                if result:
-                    msg = build_message_forex(result)
-                    await bot.send_message(
-                        chat_id=CHAT_ID,
-                        text=msg,
-                        disable_web_page_preview=True,
-                    )
-                    seen_signals["FX_" + sym] = time.time()
-                    fx_sent += 1
-                    log.info("Forex signal: %s %s score=%d" % (
-                        sym, result["direction"], result["score"]))
-                    await asyncio.sleep(2)
-
-            if fx_sent == 0:
-                log.info("No qualifying forex setups this scan.")
-
-        except Exception as e:
-            log.error("Forex scan error: %s" % e)
-
-        # ── US Stocks scan (market hours only: 13:30-20:00 UTC) ───────────────
-        if is_us_market_open():
-            try:
-                st_candidates = tv_scan_stocks(filter_side="both", limit=30)
-                log.info("TradingView stocks returned %d candidates" % len(st_candidates))
-
-                st_candidates.sort(key=lambda x: abs(x["tv_rating"]), reverse=True)
-                st_sent = 0
-
-                for tv in st_candidates:
-                    if st_sent >= 2:
-                        break
-
-                    sym  = tv["symbol"]
-                    last = seen_signals.get("ST_" + sym, 0)
-                    if time.time() - last < SIGNAL_COOLDOWN:
-                        continue
-
-                    result = score_setup_tv_only(tv, market)
-                    if result:
-                        msg = build_message_forex(result)
-                        await bot.send_message(
-                            chat_id=CHAT_ID,
-                            text=msg,
-                            disable_web_page_preview=True,
-                        )
-                        seen_signals["ST_" + sym] = time.time()
-                        st_sent += 1
-                        log.info("Stock signal: %s %s score=%d" % (
-                            sym, result["direction"], result["score"]))
-                        await asyncio.sleep(2)
-
-                if st_sent == 0:
-                    log.info("No qualifying stock setups this scan.")
-
-            except Exception as e:
-                log.error("Stocks scan error: %s" % e)
-        else:
-            log.info("US market closed — skipping stocks scan.")
+        # Forex and stocks signals disabled — crypto only
 
         log.info("Next scan in %ds..." % SCAN_INTERVAL)
         await asyncio.sleep(SCAN_INTERVAL)
