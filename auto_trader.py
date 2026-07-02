@@ -595,10 +595,21 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
         log.info("News blackout active — skipping %s" % symbol)
         return False
 
-    # Complete — Max drawdown from peak (update peak for both paper and live modes)
-    if balance > peak_balance:
-        peak_balance = balance
-    if peak_balance > 0 and (peak_balance - balance) / peak_balance * 100 >= PEAK_DRAWDOWN_LIMIT:
+    # Complete — Max drawdown from peak using equity (free cash + locked margins)
+    # Using raw paper_balance understates equity while positions are open and
+    # triggers a false drawdown halt after just 1-2 normal trades.
+    if PAPER_TRADE:
+        locked = sum(
+            (p.qty_remaining * p.entry / p.leverage)
+            for p in open_positions.values()
+            if isinstance(p, PaperPosition)
+        )
+        equity = paper_balance + locked
+    else:
+        equity = balance
+    if equity > peak_balance:
+        peak_balance = equity
+    if peak_balance > 0 and (peak_balance - equity) / peak_balance * 100 >= PEAK_DRAWDOWN_LIMIT:
         await bot.send_message(chat_id=CHAT_ID, text=(
             "[AUTO-TRADER] Peak drawdown limit hit (%.1f%% from $%.2f).\n"
             "Trading paused to protect capital.\nUse /resume to override."
@@ -818,9 +829,42 @@ async def monitor_positions(bot: Bot):
                         positions = data["result"]["list"]
                         size = float(positions[0].get("size", 0)) if positions else 0
                         if size == 0:
+                            # Fetch realized PnL from Bybit closed-pnl endpoint
+                            cpnl = 0.0
+                            try:
+                                cp = bybit_get("/v5/position/closed-pnl",
+                                               {"category": "linear", "symbol": symbol, "limit": 1})
+                                if cp.get("retCode") == 0 and cp["result"]["list"]:
+                                    cpnl = float(cp["result"]["list"][0].get("closedPnl", 0))
+                            except Exception:
+                                pass
+                            daily_stats["pnl"]   += cpnl
+                            total_stats["pnl"]   += cpnl
+                            weekly_stats["pnl"]   = weekly_stats.get("pnl", 0) + cpnl
+                            monthly_stats["pnl"]  = monthly_stats.get("pnl", 0) + cpnl
+                            weekly_stats["trades"]  = weekly_stats.get("trades", 0) + 1
+                            monthly_stats["trades"] = monthly_stats.get("trades", 0) + 1
+                            if cpnl >= 0:
+                                daily_stats["wins"]  += 1
+                                total_stats["wins"]  += 1
+                                total_stats["gross_profit"] = total_stats.get("gross_profit", 0.0) + cpnl
+                                weekly_stats["wins"]  = weekly_stats.get("wins", 0) + 1
+                                monthly_stats["wins"] = monthly_stats.get("wins", 0) + 1
+                                consecutive_losses = 0
+                            else:
+                                daily_stats["losses"]  += 1
+                                total_stats["losses"]  += 1
+                                total_stats["gross_loss"] = total_stats.get("gross_loss", 0.0) + abs(cpnl)
+                                weekly_stats["losses"]  = weekly_stats.get("losses", 0) + 1
+                                monthly_stats["losses"] = monthly_stats.get("losses", 0) + 1
+                                consecutive_losses += 1
+                                last_loss_time = time.time()
+                            circuit_breaker.record(cpnl, balance)
                             open_positions.pop(symbol, None)
+                            save_positions()
+                            save_stats()
                             await bot.send_message(chat_id=CHAT_ID,
-                                text="[LIVE] Position closed on exchange: %s" % symbol)
+                                text="[LIVE] %s closed\nRealized P&L: $%.2f" % (symbol, cpnl))
                         else:
                             # Move SL to breakeven if TP1 was hit and not yet moved
                             if not pos["tp1_hit"]:
@@ -863,6 +907,7 @@ async def monitor_positions(bot: Bot):
                     total_stats["pnl"] += pnl
                     weekly_stats["pnl"]  = weekly_stats.get("pnl", 0) + pnl
                     monthly_stats["pnl"] = monthly_stats.get("pnl", 0) + pnl
+                    circuit_breaker.record(pnl, paper_balance)
                     save_positions()
                     save_stats()
                     await bot.send_message(chat_id=CHAT_ID, text=(
@@ -888,6 +933,7 @@ async def monitor_positions(bot: Bot):
                     total_stats["pnl"] += pnl
                     weekly_stats["pnl"]  = weekly_stats.get("pnl", 0) + pnl
                     monthly_stats["pnl"] = monthly_stats.get("pnl", 0) + pnl
+                    circuit_breaker.record(pnl, paper_balance)
                     save_positions()
                     save_stats()
                     await bot.send_message(chat_id=CHAT_ID, text=(
@@ -918,6 +964,7 @@ async def monitor_positions(bot: Bot):
                     monthly_stats["trades"] = monthly_stats.get("trades", 0) + 1
                     size_note = "  Size was reduced (loss streak)" if consecutive_losses >= LOSS_STREAK_REDUCE else ""
                     consecutive_losses    = 0   # win resets streak
+                    circuit_breaker.record(pnl, paper_balance)
                     open_positions.pop(symbol, None)
                     save_positions()
                     save_stats()

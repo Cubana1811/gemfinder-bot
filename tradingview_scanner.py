@@ -691,10 +691,19 @@ def fetch_dvol() -> float:
     """
     Deribit Volatility Index (DVOL) for BTC — free public endpoint, no auth required.
     Crypto-native VIX. >90 = extreme uncertainty, TA unreliable. <35 = calm, trend continuation likely.
+    Uses get_volatility_index_data (resolution=3600) — the correct endpoint for DVOL.
     """
-    data = safe_get("https://www.deribit.com/api/v2/public/get_index_price?index_name=dvol_btc")
-    if data and data.get("result"):
-        return float(data["result"].get("index_price", 55.0))
+    import time as _time
+    end_ts   = int(_time.time() * 1000)
+    start_ts = end_ts - 3600000  # 1 hour window
+    data = safe_get(
+        "https://www.deribit.com/api/v2/public/get_volatility_index_data"
+        "?currency=BTC&resolution=3600&start_timestamp=%d&end_timestamp=%d" % (start_ts, end_ts)
+    )
+    if data and data.get("result") and data["result"].get("data"):
+        rows = data["result"]["data"]
+        if rows:
+            return float(rows[-1][4])  # [timestamp, open, high, low, close]
     return 55.0
 
 
@@ -2130,7 +2139,7 @@ def build_message(s):
         fp(s["tp3"]),  tp_sign, tp3_pct,
         s["rr"],
         s["leverage"],
-        s["leverage_max"], s["atr_pct"],
+        s["leverage_max"], s["atr_pct_vol"],
         s["alloc_pct"],
         s["sl_pct"],
         1000 * s["alloc_pct"] / 100, s["leverage_max"],
@@ -2397,7 +2406,7 @@ async def main():
                         avg_funding = sum(valid_fundings) / len(valid_fundings) if valid_fundings else funding
 
                         # Average order book imbalance (Bybit + Binance)
-                        avg_ob = (ob_imbal + ob_bnb) / 2 if ob_bnb != 1.0 else ob_imbal
+                        avg_ob = (ob_t1 + ob_bnb) / 2 if ob_bnb != 1.0 else ob_t1
 
                         # Count exchange confirmations
                         exchanges = ["Bybit"]
