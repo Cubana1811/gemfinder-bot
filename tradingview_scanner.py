@@ -770,10 +770,14 @@ def volume_profile(highs, lows, volumes, n_bins=50, lookback=100):
     while acc < total * 0.70 and (lo_i > 0 or hi_i < n_bins - 1):
         up = profile[hi_i + 1] if hi_i + 1 < n_bins else 0
         dn = profile[lo_i - 1] if lo_i > 0 else 0
-        if up >= dn:
+        if up == 0 and dn == 0:
+            break  # volume gap on both sides — can't grow value area further
+        if hi_i < n_bins - 1 and (up >= dn or lo_i == 0):
             hi_i += 1; acc += up
-        else:
+        elif lo_i > 0:
             lo_i -= 1; acc += dn
+        else:
+            break
     return centers[poc_i], centers[hi_i], centers[lo_i]
 
 
@@ -1647,7 +1651,7 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     if dxy_rt >= 0.3 and tv_rating < 0 and symbol in ("BTCUSDT", "ETHUSDT"):
         short_score += 3; short_reasons.append("DXY bullish (%.2f) — strong USD headwind for crypto" % dxy_rt)
 
-    # ── Market regime gate ────────────────────────────────────────────────────
+    # ── Crowding gate (L/S ratio) ─────────────────────────────────────────────
     if ls_ratio > 2.2 and long_score > short_score:
         return None  # retail overcrowded long — historically reverses hard
     if ls_ratio < 0.45 and short_score > long_score:
@@ -1722,7 +1726,7 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
         "leverage":         lev["lev_label"],
         "leverage_max":     lev["leverage"],
         "alloc_pct":        lev["alloc_pct"],
-        "atr_pct":          lev["atr_pct"],
+        "atr_pct_vol":      lev["atr_pct"],
         "sl_pct":           lev["sl_pct"],
         "price":            price,
         "entry":            entry,
@@ -2276,7 +2280,7 @@ async def main():
             "Target Win Rate: 78-83%%\n\n"
             "CRYPTO (Bybit + Binance + OKX):\n"
             "  - All 3 exchanges scanned + deduplicated\n"
-            "  - 17 scoring sections + 6 hard gates\n"
+            "  - 31 scoring sections + 9 hard gates\n"
             "  - Real top-trader + taker ratios\n"
             "  - Cross-exchange RSI/EMA confirmation\n"
             "  - ATR Entry / SL / TP + leverage calc\n\n"
@@ -2318,8 +2322,13 @@ async def main():
             continue
 
         market = {
-            "fear_greed": fetch_fear_greed(),
-            "btc_chg":    fetch_btc_change(),
+            "fear_greed":    fetch_fear_greed(),
+            "btc_chg":       fetch_btc_change(),
+            "btc_4h_trend":  fetch_btc_4h_trend(),
+            "btc_dom":       fetch_btc_dominance(),
+            "eth_btc_trend": fetch_eth_btc_trend(),
+            "dvol":          fetch_dvol(),
+            "dxy_rating":    fetch_dxy_signal(),
         }
         log.info("Market: FGI=%d  BTC=%+.2f%%" % (market["fear_greed"], market["btc_chg"]))
 
@@ -2358,7 +2367,9 @@ async def main():
                     k1d      = fetch_klines(symbol, "1d",  250); time.sleep(0.15)
                     funding  = fetch_funding_rate(symbol);       time.sleep(0.10)
                     oi_chg   = fetch_oi_change(symbol);          time.sleep(0.10)
-                    ob_imbal = fetch_order_book_imbalance(symbol); time.sleep(0.10)
+                    ob_t1, ob_t2, ob_t3 = fetch_layered_ob_imbalance(symbol); time.sleep(0.10)
+                    cvd      = fetch_cvd(symbol);                time.sleep(0.10)
+                    ls_r     = fetch_ls_ratio(symbol);           time.sleep(0.10)
 
                     if not k1h or not k4h:
                         continue
@@ -2373,7 +2384,9 @@ async def main():
                         oi_chg=oi_chg,
                         top_trader_ratio=fetch_top_trader_ratio(symbol),
                         taker_ratio=fetch_taker_ratio(symbol),
-                        ob_imbalance=ob_imbal,
+                        ob_imbalance=ob_t1,
+                        cvd=cvd,
+                        ls_ratio=ls_r,
                     )
 
                     if result:

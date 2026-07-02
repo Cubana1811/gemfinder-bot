@@ -44,7 +44,7 @@ from telegram import Bot
 from tradingview_scanner import (
     tv_scan_multi_exchange, score_setup, parse_klines,
     fetch_klines, fetch_klines_bnb, fetch_klines_okx,
-    fetch_funding_rate, fetch_oi_change, fetch_order_book_imbalance,
+    fetch_funding_rate, fetch_oi_change,
     fetch_top_trader_ratio, fetch_taker_ratio, exchange_confirms,
     is_active_session, btc_is_spiking, btc_is_ranging,
     fetch_fear_greed, fetch_btc_change,
@@ -368,6 +368,7 @@ def check_reset_daily():
     today = str(date.today())
     if daily_stats["date"] != today:
         daily_stats = {"date": today, "pnl": 0.0, "wins": 0, "losses": 0, "trades": 0}
+        circuit_breaker.reset_daily()
 
 def current_week_key() -> str:
     d = date.today()
@@ -594,7 +595,9 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
         log.info("News blackout active — skipping %s" % symbol)
         return False
 
-    # Complete — Max drawdown from peak
+    # Complete — Max drawdown from peak (update peak for both paper and live modes)
+    if balance > peak_balance:
+        peak_balance = balance
     if peak_balance > 0 and (peak_balance - balance) / peak_balance * 100 >= PEAK_DRAWDOWN_LIMIT:
         await bot.send_message(chat_id=CHAT_ID, text=(
             "[AUTO-TRADER] Peak drawdown limit hit (%.1f%% from $%.2f).\n"
@@ -611,18 +614,6 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
             "Trading paused until Monday.\nUse /resume to override.\n"
             "Days remaining this week: %d" % (WEEKLY_LOSS_LIMIT, days_left)))
         trading_active = False
-        return False
-
-    # Stage 3 — Portfolio heat: total risk across all positions
-    eff_risk     = effective_risk_pct()
-    current_heat = sum(
-        getattr(p, "risk_pct_used", RISK_PCT) if isinstance(p, PaperPosition)
-        else p.get("risk_pct_used", RISK_PCT)
-        for p in open_positions.values()
-    )
-    if current_heat + eff_risk > PORTFOLIO_HEAT_MAX:
-        log.info("Portfolio heat %.1f%% + %.1f%% > %.1f%% — skipping %s" % (
-            current_heat, eff_risk, PORTFOLIO_HEAT_MAX, symbol))
         return False
 
     # Stage 2 — Slippage guard: current price must be close to signal entry
@@ -671,6 +662,7 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
         pass
 
     # ── Dynamic position sizing modifiers ─────────────────────────────────────
+    eff_risk  = effective_risk_pct()
     size_mult = 1.0
     # Weekend liquidity reduction (lower volume = wider slippage, weaker signals)
     weekday = datetime.now(timezone.utc).weekday()   # 5=Sat, 6=Sun
@@ -682,6 +674,18 @@ async def execute_trade(result: dict, bot: Bot) -> bool:
     elif score < 83:
         size_mult *= 0.75
     eff_risk = eff_risk * size_mult
+
+    # Stage 3 — Portfolio heat check runs after size multipliers so the real
+    # capital consumption is compared against the cap (not the pre-multiplier value)
+    current_heat = sum(
+        getattr(p, "risk_pct_used", RISK_PCT) if isinstance(p, PaperPosition)
+        else p.get("risk_pct_used", RISK_PCT)
+        for p in open_positions.values()
+    )
+    if current_heat + eff_risk > PORTFOLIO_HEAT_MAX:
+        log.info("Portfolio heat %.1f%% + %.1f%% > %.1f%% — skipping %s" % (
+            current_heat, eff_risk, PORTFOLIO_HEAT_MAX, symbol))
+        return False
 
     # Complete — Compound mode: use current balance or fixed starting balance
     sizing_balance = balance if COMPOUND_MODE else float(PAPER_START_BAL)
@@ -792,7 +796,7 @@ async def monitor_positions(bot: Bot):
     Paper mode: poll price every 30s and simulate TP/SL hits.
     Live mode:  check if Bybit still shows the position open.
     """
-    global paper_balance, peak_balance, daily_stats, total_stats, last_loss_time, consecutive_losses, weekly_stats, monthly_stats, last_monthly_report
+    global paper_balance, peak_balance, daily_stats, total_stats, last_loss_time, consecutive_losses, weekly_stats, monthly_stats
 
     while True:
         await asyncio.sleep(30)
