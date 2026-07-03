@@ -50,7 +50,7 @@ CELL_TITLE = md("""\
 | 9 | Mix audio — loudnorm -14 LUFS stereo + white master fade |
 | 10 | Download MP4 + captions + thumbnail + YT description + chapters |
 
-**v7 fixes:** 1920×1080 · -14 LUFS · 384k AAC stereo · 20 s end card · H.264 High Profile · 2 s keyframes
+**v7 fixes:** 1920×1080 · -14 LUFS · 192k AAC stereo · 20 s end card · H.264 High Profile · 2 s keyframes
 **v6 features:** branded intro/outro · thumbnail · YT description & chapters ·
 5 skin tones · dot-grid BG · numbered-list frame · echo music · caption offset
 """)
@@ -1130,7 +1130,7 @@ for _i, _sc in enumerate(SCENE_DATA):
         '-map','[v]','-map','1:a',
         '-c:v','libx264','-crf','17','-preset','fast','-profile:v','high','-level:v','4.0',
         '-g','60','-keyint_min','30',
-        '-c:a','aac','-b:a','384k','-ac','2','-shortest','-pix_fmt','yuv420p',_clip,
+        '-c:a','aac','-b:a','192k','-ac','2','-shortest','-pix_fmt','yuv420p',_clip,
     ], capture_output=True, text=True)
     if _r.returncode!=0:
         print(f'  Clip {_i} error:\\n{_r.stderr[-400:]}')
@@ -1152,7 +1152,7 @@ if os.path.exists(_tc_img) and not os.path.exists(_tc_clip):
         '-vf',f'scale=1920:1080,fade=t=in:st=0:d=0.5:color=black,fade=t=out:st={TITLE_DUR-0.5:.1f}:d=0.5:color=white',
         '-c:v','libx264','-crf','17','-preset','fast','-profile:v','high','-level:v','4.0',
         '-g','60','-keyint_min','30',
-        '-c:a','aac','-b:a','384k','-ac','2','-pix_fmt','yuv420p',_tc_clip,
+        '-c:a','aac','-b:a','192k','-ac','2','-pix_fmt','yuv420p',_tc_clip,
     ],capture_output=True,text=True)
     if _r.returncode==0: print(f'Title card clip: {TITLE_DUR}s OK')
     else: print(f'Title clip error: {_r.stderr[-200:]}')
@@ -1173,7 +1173,7 @@ if os.path.exists(_ec_img) and not os.path.exists(_ec_clip):
         '-vf',f'scale=1920:1080,fade=t=in:st=0:d=0.5:color=white,fade=t=out:st={END_DUR-0.7:.1f}:d=0.7:color=black',
         '-c:v','libx264','-crf','17','-preset','fast','-profile:v','high','-level:v','4.0',
         '-g','60','-keyint_min','30',
-        '-c:a','aac','-b:a','384k','-ac','2','-pix_fmt','yuv420p',_ec_clip,
+        '-c:a','aac','-b:a','192k','-ac','2','-pix_fmt','yuv420p',_ec_clip,
     ],capture_output=True,text=True)
     if _r.returncode==0: print(f'End card clip: {END_DUR}s OK')
     else: print(f'End clip error: {_r.stderr[-200:]}')
@@ -1494,7 +1494,7 @@ _safe  = re.sub(r'[^\\w\\s-]+','',EPISODE_TITLE).strip().replace(' ','_')
 FINAL_VIDEO=f'{WORK_DIR}/UNLEARNED_{_safe}.mp4'
 
 print(f'Total duration: {_total:.1f}s ({_total/60:.1f} min)')
-print(f'Mixing: loudnorm -14 LUFS · 384k AAC stereo · music {int(MUSIC_VOL*100)}%')
+print(f'Mixing: loudnorm -14 LUFS · 192k AAC stereo · music {int(MUSIC_VOL*100)}%')
 print(f'Master fade: in 0.8s white | out 2.5s white')
 
 _r=subprocess.run([
@@ -1509,7 +1509,7 @@ _r=subprocess.run([
     '-vf',f'fade=t=in:st=0:d=0.8:color=white,fade=t=out:st={_fo_st:.1f}:d=2.5:color=white',
     '-c:v','libx264','-crf','17','-preset','fast','-profile:v','high','-level:v','4.0',
     '-g','60','-keyint_min','30',
-    '-c:a','aac','-b:a','384k','-ac','2','-shortest',
+    '-c:a','aac','-b:a','192k','-ac','2','-shortest',
     FINAL_VIDEO,
 ], capture_output=True, text=True)
 
@@ -1522,7 +1522,7 @@ if _r.returncode!=0:
             f'[1:a]volume={MUSIC_VOL}[mu];'
             f'[vo_n][mu]amix=inputs=2:duration=first[aout]',
         '-map','0:v','-map','[aout]',
-        '-c:v','copy','-c:a','aac','-b:a','384k','-ac','2','-shortest',
+        '-c:v','copy','-c:a','aac','-b:a','192k','-ac','2','-shortest',
         FINAL_VIDEO,
     ], capture_output=True, text=True)
     if _r2.returncode!=0:
