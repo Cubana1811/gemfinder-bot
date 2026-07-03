@@ -1,24 +1,24 @@
 """
-Build the Unlearned Video Generator Colab notebook — v6 (Perfect Edition).
+Build the Unlearned Video Generator Colab notebook — v7 (YouTube Standard).
 Run: python build_notebook.py
 Output: unlearned_generator.ipynb
 
-V6 vs V5:
+V7 vs V6 — YouTube Standard fixes:
+  - 1920×1080 output (all clips, title card, end card upscaled via LANCZOS)
+  - Audio loudnorm target -14 LUFS (YouTube recommended, was -16)
+  - Stereo audio enforced (-ac 2) on every ffmpeg output stage
+  - Subscribe end card extended 4 s → 20 s (fits YouTube end-screen overlay)
+  - ASS captions updated: PlayRes 1920×1080, font 42, outline 3.5, MarginV 48
+
+V6 features carried forward:
   - Branded 3 s title card (dark navy + episode title + UNLEARNED badge)
-  - 4 s subscribe end card (bell icon, channel name, tags)
-  - YouTube thumbnail.jpg auto-generated
+  - YouTube thumbnail.jpg auto-generated (eye-catching dark bg + spotlight)
   - yt_description.txt + yt_chapters.txt downloaded with video
   - Music echo reverb (aecho 0.85:0.90:40:0.35)
   - 5 skin-tone variations cycling per scene
   - Dot-grid texture on soft/white backgrounds
-  - 13th frame type: numbered_list (colored circles + item text)
-  - Script formatting guide printed before upload
-  - Scene validation: warn <8 words or >25 words
-  - Voice selector in Setup (4 voices commented)
+  - 13 frame types including numbered_list
   - Caption timing offset reads title_dur.txt
-  - Assemble prepends clip_title.mp4 + appends clip_end.mp4
-  - Mix reads title_dur.txt + end_dur.txt for correct fade timing
-  - Download: video + srt + ass + thumbnail + yt_description + yt_chapters
 """
 import json, os
 
@@ -34,7 +34,7 @@ def code(src):
 # ── CELL 1: Title ──────────────────────────────────────────────────────────────
 
 CELL_TITLE = md("""\
-# UNLEARNED — Automated Video Generator  v6 ✦ Perfect Edition
+# UNLEARNED — Automated Video Generator  v7 ✦ YouTube Standard
 ### Psychology · Ancient History · Behavioral Science
 
 | Cell | What it does |
@@ -43,14 +43,15 @@ CELL_TITLE = md("""\
 | 2 | Setup — voice selector, volume |
 | 3 | Upload `.txt` script → voiceover + word-timing VTT |
 | 4 | Doodle images — 13 frame types, skin tones, dot-grid BG, title/end/thumbnail |
-| 5 | Ken Burns motion clips + title card clip + end card clip |
+| 5 | Ken Burns motion clips (1920×1080) + title card + 20 s end card |
 | 6 | Background music — chunk-KS harp, 16-bar loop, echo reverb |
 | 7 | Assemble: title card + scenes + end card |
-| 8 | Burn yellow ASS captions (4-word sync, caption offset) |
-| 9 | Mix audio + loudnorm + white master fade |
+| 8 | Burn yellow ASS captions (4-word sync, 1080p scale) |
+| 9 | Mix audio — loudnorm -14 LUFS stereo + white master fade |
 | 10 | Download MP4 + captions + thumbnail + YT description + chapters |
 
-**v6 highlights:** branded intro/outro · thumbnail · YT description & chapters ·
+**v7 fixes:** 1920×1080 · -14 LUFS · stereo · 20 s end card · 1080p captions
+**v6 features:** branded intro/outro · thumbnail · YT description & chapters ·
 5 skin tones · dot-grid BG · numbered-list frame · echo music · caption offset
 """)
 
@@ -930,7 +931,7 @@ else:
                     _prop_heart(_d,_mx,_fy-max(int(128*0.24),14)-62,28)
 
         _watermark(_d)
-        _img.save(_out)
+        _img.resize((1920, 1080), Image.LANCZOS).save(_out)
         print(f'  [{_i+1}/{_n}] {_ft:<14} {_ex:<8} {_txt[:46]}')
 
     print(f'\\nAll {_n} images drawn.')
@@ -956,7 +957,7 @@ if not os.path.exists(_tc_path):
         _tcd.text((W//2-(_tb[2]-_tb[0])//2,_tty),_tl,fill=C['white'],font=_tf)
         _tty+=92
     _tcd.line([(90,H-90),(W-90,H-90)],fill=C['orange'],width=2)
-    _tc.save(_tc_path)
+    _tc.resize((1920, 1080), Image.LANCZOS).save(_tc_path)
     print(f'Title card: {_tc_path}')
 
 # ── Eye-catching YouTube thumbnail ────────────────────────────────────────────
@@ -1049,7 +1050,7 @@ if not os.path.exists(_ec_path):
     _sf3=_font(24); _sub='Psychology  .  Ancient History  .  Behavioral Science'
     _sb3=_ecd.textbbox((0,0),_sub,font=_sf3)
     _ecd.text((W//2-(_sb3[2]-_sb3[0])//2,H//2+200),_sub,fill=(170,170,170),font=_sf3)
-    _ec.save(_ec_path)
+    _ec.resize((1920, 1080), Image.LANCZOS).save(_ec_path)
     print(f'End card  : {_ec_path}')
 
 # Preview first 3 scenes in notebook
@@ -1095,14 +1096,14 @@ for _i, _sc in enumerate(SCENE_DATA):
     _fo_st=max(0.0, _dur-_TD-0.05)
     _fi=f',fade=t=in:st=0:d={_TD}:color=white' if _i>0 else ''
     _fo=f',fade=t=out:st={_fo_st:.2f}:d={_TD}:color=white'
-    _vf=f'[0:v]scale=1280:720,zoompan={_zp}:s=1280x720:fps=30{_fi}{_fo}[v]'
+    _vf=f'[0:v]scale=1920:1080,zoompan={_zp}:s=1920x1080:fps=30{_fi}{_fo}[v]'
 
     _r=subprocess.run([
         'ffmpeg','-y','-loop','1','-i',_img,'-i',_audio,
         '-filter_complex',_vf,
         '-map','[v]','-map','1:a',
         '-c:v','libx264','-crf','17','-preset','fast',
-        '-c:a','aac','-b:a','192k','-shortest','-pix_fmt','yuv420p',_clip,
+        '-c:a','aac','-b:a','192k','-ac','2','-shortest','-pix_fmt','yuv420p',_clip,
     ], capture_output=True, text=True)
     if _r.returncode!=0:
         print(f'  Clip {_i} error:\\n{_r.stderr[-400:]}')
@@ -1121,9 +1122,9 @@ if os.path.exists(_tc_img) and not os.path.exists(_tc_clip):
         'ffmpeg','-y','-loop','1','-i',_tc_img,
         '-f','lavfi','-i','anullsrc=r=44100:cl=stereo',
         '-t',str(TITLE_DUR),
-        '-vf',f'scale=1280:720,fade=t=in:st=0:d=0.5:color=black,fade=t=out:st={TITLE_DUR-0.5:.1f}:d=0.5:color=white',
+        '-vf',f'scale=1920:1080,fade=t=in:st=0:d=0.5:color=black,fade=t=out:st={TITLE_DUR-0.5:.1f}:d=0.5:color=white',
         '-c:v','libx264','-crf','17','-preset','fast',
-        '-c:a','aac','-b:a','192k','-pix_fmt','yuv420p',_tc_clip,
+        '-c:a','aac','-b:a','192k','-ac','2','-pix_fmt','yuv420p',_tc_clip,
     ],capture_output=True,text=True)
     if _r.returncode==0: print(f'Title card clip: {TITLE_DUR}s OK')
     else: print(f'Title clip error: {_r.stderr[-200:]}')
@@ -1133,7 +1134,7 @@ with open(_td_f,'w') as _f:
     _f.write(str(TITLE_DUR) if os.path.exists(_tc_clip) else '0.0')
 
 # ── End card clip (4 s) ───────────────────────────────────────────────────────
-END_DUR = 4.0
+END_DUR = 20.0
 _ec_img = f'{WORK_DIR}/end_card.png'
 _ec_clip = f'{CLIP_DIR}/clip_end.mp4'
 if os.path.exists(_ec_img) and not os.path.exists(_ec_clip):
@@ -1141,9 +1142,9 @@ if os.path.exists(_ec_img) and not os.path.exists(_ec_clip):
         'ffmpeg','-y','-loop','1','-i',_ec_img,
         '-f','lavfi','-i','anullsrc=r=44100:cl=stereo',
         '-t',str(END_DUR),
-        '-vf',f'scale=1280:720,fade=t=in:st=0:d=0.5:color=white,fade=t=out:st={END_DUR-0.7:.1f}:d=0.7:color=black',
+        '-vf',f'scale=1920:1080,fade=t=in:st=0:d=0.5:color=white,fade=t=out:st={END_DUR-0.7:.1f}:d=0.7:color=black',
         '-c:v','libx264','-crf','17','-preset','fast',
-        '-c:a','aac','-b:a','192k','-pix_fmt','yuv420p',_ec_clip,
+        '-c:a','aac','-b:a','192k','-ac','2','-pix_fmt','yuv420p',_ec_clip,
     ],capture_output=True,text=True)
     if _r.returncode==0: print(f'End card clip: {END_DUR}s OK')
     else: print(f'End clip error: {_r.stderr[-200:]}')
@@ -1376,13 +1377,13 @@ for _sc in SCENE_DATA:
 ASS_HEADER='''[Script Info]
 ScriptType: v4.00+
 WrapStyle: 0
-PlayResX: 1280
-PlayResY: 720
+PlayResX: 1920
+PlayResY: 1080
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,28,&H0000FFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2.5,0,2,10,10,32,1
+Style: Default,Arial,42,&H0000FFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,3.5,0,2,10,10,48,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -1401,7 +1402,7 @@ with open(_srt_path,'w',encoding='utf-8') as f:
     for idx,(s,e,txt) in enumerate(_all,1):
         f.write(f'{idx}\\n{_srt_ts(s)} --> {_srt_ts(e)}\\n{txt.strip()}\\n\\n')
 
-print(f'Captions: {len(_all)} entries (offset={_title_off:.1f}s, font-28, yellow)')
+print(f'Captions: {len(_all)} entries (offset={_title_off:.1f}s, font-42, yellow, 1080p)')
 
 _ass_esc=_ass_path.replace('\\\\','/').replace(':','\\\\:')
 CAPTIONED_VIDEO=f'{WORK_DIR}/video_captioned.mp4'
@@ -1416,7 +1417,7 @@ _r=subprocess.run([
 if _r.returncode!=0:
     print('ASS burn failed — trying SRT subtitles filter...')
     _srt_esc=_srt_path.replace('\\\\','/').replace(':','\\\\:')
-    _style="FontName=Arial,FontSize=26,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,Outline=2.5,Bold=1,Alignment=2,MarginV=32"
+    _style="FontName=Arial,FontSize=42,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,Outline=3.5,Bold=1,Alignment=2,MarginV=48"
     _r2=subprocess.run([
         'ffmpeg','-y','-i',RAW_VIDEO,
         '-vf',f"subtitles='{_srt_esc}':force_style='{_style}'",
@@ -1430,7 +1431,7 @@ if _r.returncode!=0:
     else:
         print('SRT fallback OK.')
 else:
-    print('Captions burned: yellow / font-28 / 2.5px outline.')
+    print('Captions burned: yellow / font-42 / 3.5px outline / 1080p.')
 
 print('Run Cell 9.')
 """)
@@ -1462,21 +1463,21 @@ _safe  = re.sub(r'[^\\w\\s-]+','',EPISODE_TITLE).strip().replace(' ','_')
 FINAL_VIDEO=f'{WORK_DIR}/UNLEARNED_{_safe}.mp4'
 
 print(f'Total duration: {_total:.1f}s ({_total/60:.1f} min)')
-print(f'Mixing: loudnorm -16 LUFS + music {int(MUSIC_VOL*100)}%')
+print(f'Mixing: loudnorm -14 LUFS stereo + music {int(MUSIC_VOL*100)}%')
 print(f'Master fade: in 0.8s white | out 2.5s white')
 
 _r=subprocess.run([
     'ffmpeg','-y',
     '-i',CAPTIONED_VIDEO,'-i',MUSIC_MP3,
     '-filter_complex',
-        f'[0:a]loudnorm=I=-16:TP=-1.5:LRA=11:linear=true[vo_n];'
+        f'[0:a]loudnorm=I=-14:TP=-1.5:LRA=11:linear=true[vo_n];'
         f'[1:a]volume={MUSIC_VOL}[mu];'
         f'[vo_n][mu]amix=inputs=2:duration=first[a_mix];'
         f'[a_mix]afade=t=in:st=0:d=0.8,afade=t=out:st={_fo_st:.1f}:d=2.5[aout]',
     '-map','0:v','-map','[aout]',
     '-vf',f'fade=t=in:st=0:d=0.8:color=white,fade=t=out:st={_fo_st:.1f}:d=2.5:color=white',
     '-c:v','libx264','-crf','17','-preset','fast',
-    '-c:a','aac','-b:a','192k','-shortest',
+    '-c:a','aac','-b:a','192k','-ac','2','-shortest',
     FINAL_VIDEO,
 ], capture_output=True, text=True)
 
@@ -1485,11 +1486,11 @@ if _r.returncode!=0:
     _r2=subprocess.run([
         'ffmpeg','-y','-i',CAPTIONED_VIDEO,'-i',MUSIC_MP3,
         '-filter_complex',
-            f'[0:a]loudnorm=I=-16:TP=-1.5:LRA=11:linear=true[vo_n];'
+            f'[0:a]loudnorm=I=-14:TP=-1.5:LRA=11:linear=true[vo_n];'
             f'[1:a]volume={MUSIC_VOL}[mu];'
             f'[vo_n][mu]amix=inputs=2:duration=first[aout]',
         '-map','0:v','-map','[aout]',
-        '-c:v','copy','-c:a','aac','-b:a','192k','-shortest',
+        '-c:v','copy','-c:a','aac','-b:a','192k','-ac','2','-shortest',
         FINAL_VIDEO,
     ], capture_output=True, text=True)
     if _r2.returncode!=0:
