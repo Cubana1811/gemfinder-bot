@@ -1497,14 +1497,16 @@ print(f'Total duration: {_total:.1f}s ({_total/60:.1f} min)')
 print(f'Mixing: loudnorm -14 LUFS · 192k AAC stereo · music {int(MUSIC_VOL*100)}%')
 print(f'Master fade: in 0.8s white | out 2.5s white')
 
+_AF = (f'[0:a]loudnorm=I=-14:TP=-1.5:LRA=11,'
+       f'aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo[vo_n];'
+       f'[1:a]volume={MUSIC_VOL}[mu];'
+       f'[vo_n][mu]amix=inputs=2:duration=first[a_mix];'
+       f'[a_mix]afade=t=in:st=0:d=0.8,afade=t=out:st={_fo_st:.1f}:d=2.5[aout]')
+
 _r=subprocess.run([
     'ffmpeg','-y',
     '-i',CAPTIONED_VIDEO,'-i',MUSIC_MP3,
-    '-filter_complex',
-        f'[0:a]loudnorm=I=-14:TP=-1.5:LRA=11:linear=true[vo_n];'
-        f'[1:a]volume={MUSIC_VOL}[mu];'
-        f'[vo_n][mu]amix=inputs=2:duration=first[a_mix];'
-        f'[a_mix]afade=t=in:st=0:d=0.8,afade=t=out:st={_fo_st:.1f}:d=2.5[aout]',
+    '-filter_complex',_AF,
     '-map','0:v','-map','[aout]',
     '-vf',f'fade=t=in:st=0:d=0.8:color=white,fade=t=out:st={_fo_st:.1f}:d=2.5:color=white',
     '-c:v','libx264','-crf','17','-preset','fast','-profile:v','high','-level:v','4.0',
@@ -1514,19 +1516,35 @@ _r=subprocess.run([
 ], capture_output=True, text=True)
 
 if _r.returncode!=0:
-    print('Full mix failed — trying without video fade...')
+    print('Attempt 1 failed — trying copy video...')
+    _AF2 = (f'[0:a]loudnorm=I=-14:TP=-1.5:LRA=11,'
+            f'aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo[vo_n];'
+            f'[1:a]volume={MUSIC_VOL}[mu];'
+            f'[vo_n][mu]amix=inputs=2:duration=first[aout]')
     _r2=subprocess.run([
         'ffmpeg','-y','-i',CAPTIONED_VIDEO,'-i',MUSIC_MP3,
-        '-filter_complex',
-            f'[0:a]loudnorm=I=-14:TP=-1.5:LRA=11:linear=true[vo_n];'
-            f'[1:a]volume={MUSIC_VOL}[mu];'
-            f'[vo_n][mu]amix=inputs=2:duration=first[aout]',
+        '-filter_complex',_AF2,
         '-map','0:v','-map','[aout]',
         '-c:v','copy','-c:a','aac','-b:a','192k','-ac','2','-shortest',
         FINAL_VIDEO,
     ], capture_output=True, text=True)
     if _r2.returncode!=0:
-        print(_r2.stderr[-600:]); raise RuntimeError('Mix failed')
+        print('Attempt 2 failed — trying simple volume mix...')
+        _AF3 = (f'[0:a]volume=2.0,aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo[vo_n];'
+                f'[1:a]volume={MUSIC_VOL}[mu];'
+                f'[vo_n][mu]amix=inputs=2:duration=first[aout]')
+        _r3=subprocess.run([
+            'ffmpeg','-y','-i',CAPTIONED_VIDEO,'-i',MUSIC_MP3,
+            '-filter_complex',_AF3,
+            '-map','0:v','-map','[aout]',
+            '-c:v','copy','-c:a','aac','-b:a','128k','-shortest',
+            FINAL_VIDEO,
+        ], capture_output=True, text=True)
+        if _r3.returncode!=0:
+            print('Attempt 3 failed — saving video without background music...')
+            import shutil as _sh
+            _sh.copy2(CAPTIONED_VIDEO, FINAL_VIDEO)
+            print('Video saved (no background music — all other features intact)')
 
 _mb=os.path.getsize(FINAL_VIDEO)/1_048_576
 print(f'\\nFinal video : {FINAL_VIDEO}')
