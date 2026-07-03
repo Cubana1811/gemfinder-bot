@@ -539,18 +539,29 @@ print('Paste into Midjourney / DALL-E / Ideogram to generate the image.')
 """)
 
 CELL_ARCHIVE_FOOTAGE = code("""\
-# ── STEP 6C (PATH A): Real Archive.org Footage — No GPU needed ──────────────
-# Searches Archive.org Prelinger Archives + National Archives for real public
-# domain footage matched to each scene. Downloads only the seconds you need.
+# ── STEP 6C (PATH A): Pexels Stock Footage — No GPU needed ──────────────────
+# Searches Pexels for bright modern HD footage matched to each scene.
+# Falls back to a bright FACT CARD showing the exact stat from the voiceover.
 #
-# PATH A users: run this INSTEAD of Steps 6 (Load Model) + 7 (Gen Clips).
+# FREE API KEY: pexels.com/api  (instant, no credit card)
+# Paste your key below, then run this INSTEAD of Steps 6 + 7.
 # Flow: 3 -> 4 -> 5 -> 5B -> 6C -> 8 -> 9 -> 10 -> 11 -> 12 -> 13
 # ─────────────────────────────────────────────────────────────────────────────
+
+PEXELS_API_KEY = ""   # <- paste your free key here  e.g. "abc123xyz..."
+
 import requests, json, os, re, subprocess, time
 from PIL import Image, ImageDraw, ImageFont
 
+if not PEXELS_API_KEY.strip():
+    raise RuntimeError(
+        'Pexels API key is empty.\\n'
+        'Get a free key at pexels.com/api (30 seconds, no credit card).\\n'
+        'Paste it in PEXELS_API_KEY above, then re-run this cell.'
+    )
+
 os.makedirs('/content/dark_files/clips', exist_ok=True)
-os.makedirs('/content/dark_files/archive_raw', exist_ok=True)
+os.makedirs('/content/dark_files/pexels_raw', exist_ok=True)
 
 if 'scenes' not in dir() or 'durations' not in dir() or 'audio_paths' not in dir():
     _jpath = '/content/dark_files/scene_data.json'
@@ -563,146 +574,227 @@ if 'scenes' not in dir() or 'durations' not in dir() or 'audio_paths' not in dir
     durations   = [x['duration'] for x in _sd]
     print(f'Recovered {len(scenes)} scenes from disk.')
 
-_COLLS = 'collection:(prelinger OR usnatarchivesav OR aroundtheworld)'
-_HDR   = {'User-Agent': 'DarkFilesBot/1.0 (educational colab notebook)'}
+if 'EPISODE_TITLE' not in dir():
+    EPISODE_TITLE = 'The Classified Files'
 
-_KW_MAP = [
-    (r'pilot|flight|aircraft|plane|cockpit|runway|aviator',  ['aircraft', 'flight', 'aviation']),
-    (r'military|army|soldier|troops|war|battle|combat',      ['military', 'war', 'soldiers']),
-    (r'government|federal|washington|capitol|congress',      ['government', 'washington']),
-    (r'court|trial|judge|jury|verdict|testif|lawyer',        ['courtroom', 'trial', 'justice']),
-    (r'city|street|urban|downtown|building|neighborhood',    ['city street', 'urban']),
-    (r'factory|industri|manufactur|plant|labor|worker',      ['factory', 'industrial', 'workers']),
-    (r'police|detective|crime|arrest|officer|sheriff',       ['police', 'law enforcement']),
-    (r'hospital|medical|doctor|nurse|patient|clinic',        ['hospital', 'medical']),
-    (r'ocean|sea|ship|boat|coast|naval|harbor',              ['ocean', 'ship', 'coast']),
-    (r'forest|tree|nature|wilderness|outdoor|rural',         ['forest', 'nature', 'landscape']),
-    (r'crowd|protest|demonstration|march|rally|strike',      ['crowd', 'demonstration']),
-    (r'document|file|record|paper|report|evidence',          ['documents', 'records']),
-    (r'prison|jail|incarcerat|cell|inmate',                  ['prison', 'jail']),
-    (r'school|student|education|classroom|teacher',          ['school', 'education']),
-    (r'family|home|domestic|community|house',                ['family', 'home']),
-    (r'news|press|media|journalist|headline|broadcast',      ['news', 'press', 'media']),
-    (r'phone|telephone|radio|signal|transmit',               ['telephone', 'radio', 'communication']),
-]
-
+_PHDR  = {'Authorization': PEXELS_API_KEY}
 _STOPS = {
-    'about','after','again','before','being','between','called','could','every',
-    'first','found','going','great','having','heard','never','other','still',
-    'their','there','these','those','through','under','where','which','while',
-    'would','years','because','without','another','during','since','until',
+    'about','after','again','also','back','been','before','being','between',
+    'both','called','could','every','first','found','from','going','great',
+    'having','heard','into','just','know','like','make','more','most','much',
+    'never','once','only','other','over','said','same','seen','since','some',
+    'still','such','than','that','their','them','then','there','these','they',
+    'this','those','through','time','under','until','very','what','when',
+    'where','which','while','will','with','would','year','years','because',
+    'without','another','during','since','until',
 }
 
-def _archive_kw(text):
-    low = text.lower()
-    for pat, kw_list in _KW_MAP:
-        if re.search(pat, low):
-            return kw_list
-    words = re.findall(r'\\b[a-zA-Z]{5,}\\b', text)
-    kw = [w for w in words if w.lower() not in _STOPS][:3]
-    return kw if kw else ['history', 'documentary']
+_KW_MAP = [
+    (r'pilot|flight|aircraft|plane|cockpit|runway|aviator|altitude|took off',
+     'aircraft cockpit pilot flight sky'),
+    (r'military|army|soldier|troops|war|battle|combat|navy|air force',
+     'military soldiers war'),
+    (r'government|federal|washington|capitol|congress|senate|white house',
+     'government building federal official'),
+    (r'court|trial|judge|jury|verdict|testif|lawyer|hearing|defendant',
+     'courtroom trial judge gavel'),
+    (r'city|street|urban|downtown|building|neighborhood|town',
+     'city street downtown urban'),
+    (r'factory|industri|manufactur|plant|labor|worker|assembly',
+     'factory industrial workers production'),
+    (r'police|detective|crime|arrest|officer|sheriff|badge|handcuff',
+     'police officer crime investigation'),
+    (r'hospital|medical|doctor|nurse|patient|clinic|surgery',
+     'hospital doctor medical'),
+    (r'ocean|sea|ship|boat|coast|naval|harbor|water|strait',
+     'ocean sea waves coast'),
+    (r'forest|tree|nature|wilderness|outdoor|rural|wood',
+     'forest nature trees outdoor'),
+    (r'crowd|protest|demonstration|march|rally|strike|riot',
+     'crowd protest demonstration march'),
+    (r'document|file|record|paper|report|evidence|folder|archive',
+     'documents files paperwork office desk'),
+    (r'prison|jail|incarcerat|cell|inmate|bars|detention',
+     'prison jail bars corridor'),
+    (r'school|student|education|classroom|teacher|university',
+     'school classroom students education'),
+    (r'family|home|domestic|community|house|parent|child',
+     'family home community neighborhood'),
+    (r'news|press|media|journalist|reporter|headline|broadcast',
+     'news reporter journalist interview'),
+    (r'phone|telephone|radio|signal|transmit|wire|intercept',
+     'telephone phone radio communication'),
+    (r'night|dark|shadow|midnight|evening|dusk',
+     'night city lights street dark'),
+    (r'dead|body|remains|murder|kill|victim|crime scene|homicide',
+     'crime scene evidence investigation tape'),
+    (r'money|fund|finance|bank|dollar|payment|bribe|fraud|embezzl',
+     'money finance bank documents'),
+    (r'fire|explosion|disaster|accident|crash|wreck|emergency',
+     'fire emergency rescue disaster'),
+    (r'secret|hidden|classified|suppress|cover|conceal|withheld',
+     'classified documents folder secret'),
+    (r'gun|weapon|shoot|bullet|firearm|pistol|rifle|shot',
+     'law enforcement weapon police firearms'),
+    (r'car|vehicle|drive|road|highway|chase|traffic|accident',
+     'car road driving highway'),
+    (r'computer|technology|digital|hack|cyber|server|data|network',
+     'computer technology digital data'),
+    (r'interview|witness|survivor|family|statement|spoke|said',
+     'interview person speaking testimony'),
+    (r'disappear|vanish|missing|abduct|gone|never found|lost',
+     'empty room missing person search'),
+]
 
-def _search(kw):
-    q = ' '.join(kw) + ' ' + _COLLS
+def _pexels_query(text):
+    low = text.lower()
+    for pat, query in _KW_MAP:
+        if re.search(pat, low):
+            return query
+    words = re.findall(r'\\b[a-zA-Z]{5,}\\b', text)
+    kw = [w for w in words if w.lower() not in _STOPS][:4]
+    return ' '.join(kw) if kw else 'documentary investigation'
+
+def _pexels_search(query):
     try:
         r = requests.get(
-            'https://archive.org/advancedsearch.php',
-            params={'q': q, 'output': 'json', 'fl': 'identifier,mediatype',
-                    'rows': '8', 'sort': 'downloads+desc', 'mediatype': 'movies'},
-            headers=_HDR, timeout=15,
+            'https://api.pexels.com/videos/search',
+            headers=_PHDR,
+            params={'query': query, 'per_page': 8,
+                    'orientation': 'landscape', 'size': 'medium'},
+            timeout=15,
         )
         r.raise_for_status()
-        docs = r.json().get('response', {}).get('docs', [])
-        return [d['identifier'] for d in docs if d.get('mediatype') == 'movies']
+        return r.json().get('videos', [])
     except Exception as e:
-        print(f'    search error: {e}')
+        print(f'    Pexels search error: {e}')
         return []
 
-def _mp4_url(ident):
-    try:
-        r = requests.get(
-            'https://archive.org/metadata/' + ident,
-            headers=_HDR, timeout=15,
-        )
-        r.raise_for_status()
-        files = r.json().get('files', [])
-        # Prefer small derivative mp4s (faster download)
-        for tag in ['512Kb', '256Kb', 'MPEG4']:
-            for fi in files:
-                if fi.get('name','').endswith('.mp4') and tag in fi.get('name',''):
-                    return 'https://archive.org/download/' + ident + '/' + fi['name']
-        for fi in files:
-            if fi.get('name','').endswith('.mp4') and fi.get('source') == 'derivative':
-                return 'https://archive.org/download/' + ident + '/' + fi['name']
-        for fi in files:
-            if fi.get('name','').endswith('.mp4'):
-                return 'https://archive.org/download/' + ident + '/' + fi['name']
-    except Exception as e:
-        print(f'    metadata error {ident}: {e}')
+def _best_url(videos):
+    for vid in videos:
+        files = vid.get('video_files', [])
+        hd = [f for f in files
+              if f.get('width', 0) >= 1280 and f.get('file_type') == 'video/mp4']
+        if hd:
+            return sorted(hd, key=lambda x: x.get('width', 0))[0]['link']
+        mp4 = [f for f in files if f.get('file_type') == 'video/mp4']
+        if mp4:
+            return mp4[0]['link']
     return None
 
-def _fetch_clip(url, out, dur, offset=45):
+def _fetch_pexels(url, out, dur, offset=5):
     try:
         res = subprocess.run([
             'ffmpeg', '-y',
             '-ss', str(offset), '-t', str(dur + 2), '-i', url,
             '-vf', 'scale=1024:576:force_original_aspect_ratio=increase,crop=1024:576',
-            '-c:v', 'libx264', '-crf', '22', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+            '-c:v', 'libx264', '-crf', '18', '-preset', 'fast', '-pix_fmt', 'yuv420p',
             '-an', out,
-        ], capture_output=True, timeout=120)
+        ], capture_output=True, timeout=90)
         return (res.returncode == 0
                 and os.path.exists(out)
-                and os.path.getsize(out) > 10000)
+                and os.path.getsize(out) > 20000)
     except Exception as e:
         print(f'    fetch error: {e}')
         return False
 
-def _dark_doc(text, out_png):
+# ── Bright fact-card fallback ──────────────────────────────────────────────────
+def _extract_stat(text):
+    pairs = re.findall(r'\\b(\\d[\\d,]*)\\s+([a-zA-Z]+(?:\\s+[a-zA-Z]+)?)', text)
+    if pairs:
+        num, noun = pairs[0]
+        return num, noun.upper()
+    yr = re.search(r'\\b(19|20)\\d{2}\\b', text)
+    if yr:
+        return yr.group(0), 'YEAR'
+    pct = re.search(r'(\\d+)\\s*(?:percent|%)', text, re.IGNORECASE)
+    if pct:
+        return pct.group(1) + '%', 'PERCENT'
+    return None, None
+
+def _fact_card(text, out_png, ep_title=''):
     W, H = 1024, 576
-    img  = Image.new('RGB', (W, H), (18, 18, 20))
+    img  = Image.new('RGB', (W, H), (255, 255, 255))
     draw = ImageDraw.Draw(img)
-    # aged paper page
-    draw.rectangle([60, 40, W-60, H-40], fill=(240, 232, 210), outline=(160, 140, 100), width=2)
-    # ruled lines
-    for y_ln in range(90, H-55, 26):
-        draw.line([(90, y_ln), (W-90, y_ln)], fill=(195, 182, 155), width=1)
-    # redaction bars
-    for bar_y in [108, 160, 212, 264]:
-        draw.rectangle([100, bar_y, W//2+60, bar_y+16], fill=(15, 15, 15))
-    # text excerpt
-    excerpt = text[:75].upper()
+
+    # Light gray top banner
+    draw.rectangle([0, 0, W, 68], fill=(246, 246, 246))
+    # Red left accent bar
+    draw.rectangle([0, 0, 10, H], fill=(204, 28, 28))
+    # Bottom separator
+    draw.line([(30, H - 58), (W - 30, H - 58)], fill=(220, 220, 220), width=1)
+
+    # Fonts: Liberation (modern) -> DejaVu -> default
     try:
-        fn  = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf', 13)
-        fn2 = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf', 11)
+        fn_big = ImageFont.truetype('/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf', 108)
+        fn_mid = ImageFont.truetype('/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf', 34)
+        fn_sm  = ImageFont.truetype('/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf', 16)
+        fn_ep  = ImageFont.truetype('/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf', 14)
     except Exception:
         try:
-            fn = fn2 = ImageFont.load_default(size=13)
-        except TypeError:
-            fn = fn2 = ImageFont.load_default()
-    draw.text((102, 290), excerpt, fill=(35, 25, 15), font=fn)
-    # CLASSIFIED stamp
-    draw.rectangle([W-236, H-106, W-72, H-74], fill=(175, 18, 18))
-    draw.text((W-224, H-100), 'CLASSIFIED', fill=(255, 255, 255), font=fn2)
+            fn_big = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 108)
+            fn_mid = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 34)
+            fn_sm  = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 16)
+            fn_ep  = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 14)
+        except Exception:
+            try:
+                fn_big = fn_mid = fn_sm = fn_ep = ImageFont.load_default(size=20)
+            except TypeError:
+                fn_big = fn_mid = fn_sm = fn_ep = ImageFont.load_default()
+
+    # Episode label in banner
+    draw.text((28, 22), (ep_title or 'DARK FILES').upper(), fill=(150, 150, 150), font=fn_ep)
+
+    stat_num, stat_label = _extract_stat(text)
+
+    if stat_num:
+        # Large stat number centered
+        draw.text((W // 2, H // 2 - 24), stat_num,
+                  fill=(20, 20, 20), font=fn_big, anchor='mm')
+        # Red label below
+        draw.text((W // 2, H // 2 + 76), stat_label,
+                  fill=(204, 28, 28), font=fn_mid, anchor='mm')
+        # Narration snippet at bottom
+        excerpt = text[:96] + ('...' if len(text) > 96 else '')
+        draw.text((W // 2, H - 30), excerpt,
+                  fill=(160, 160, 160), font=fn_sm, anchor='mm')
+    else:
+        # No number: show narration text in large centered lines
+        words = text.split()
+        lines, line = [], []
+        for w in words:
+            line.append(w)
+            if len(' '.join(line)) > 36:
+                lines.append(' '.join(line[:-1]))
+                line = [w]
+        if line:
+            lines.append(' '.join(line))
+        y0 = H // 2 - (min(len(lines), 5) * 44) // 2
+        for li, ln in enumerate(lines[:5]):
+            draw.text((W // 2, y0 + li * 44), ln.upper(),
+                      fill=(25, 25, 25), font=fn_mid, anchor='mm')
+        draw.text((W // 2, H - 30), text[:60],
+                  fill=(170, 170, 170), font=fn_sm, anchor='mm')
+
     img.save(out_png)
 
-_KB_ARC = [
+_KB_P = [
     "zoompan=z='min(zoom+0.0010,1.4)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
     "zoompan=z='min(zoom+0.0012,1.35)':x='min(iw-iw/zoom,iw/2-(iw/zoom/2)+in*0.3)':y='ih/2-(ih/zoom/2)'",
     "zoompan=z='max(1.0,1.3-in*0.0012)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
     "zoompan=z='min(zoom+0.0008,1.25)':x='iw/2-(iw/zoom/2)':y='max(0,ih/2-(ih/zoom/2)-in*0.15)'",
 ]
 
-def _kb_arc(img_path, out, dur, idx=0):
+def _kb_still(img_path, out, dur, idx=0):
     fps = 25
     fr  = max(int(dur * fps) + 2, 2)
-    eff = _KB_ARC[idx % len(_KB_ARC)]
-    res = subprocess.run([
+    eff = _KB_P[idx % len(_KB_P)]
+    subprocess.run([
         'ffmpeg', '-y', '-loop', '1', '-i', img_path,
         '-vf', f'{eff}:d={fr}:s=1024x576,fps={fps}',
-        '-c:v', 'libx264', '-crf', '20', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+        '-c:v', 'libx264', '-crf', '18', '-preset', 'fast', '-pix_fmt', 'yuv420p',
         '-t', str(dur + 0.5), '-an', out,
     ], capture_output=True)
-    return res.returncode == 0
 
 def _add_audio(vid, ap, out, dur):
     subprocess.run([
@@ -713,11 +805,12 @@ def _add_audio(vid, ap, out, dur):
     ], capture_output=True, check=True)
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
-print(f'PATH A — Archive.org footage for {len(scenes)} scenes')
-print('Searching Prelinger Archives + National Archives ...\\n')
+print(f'PATH A — Pexels footage for {len(scenes)} scenes')
+print('Bright matching visuals — no GPU needed\\n')
+
 clip_paths = []
-n_archive  = 0
-n_fallback = 0
+n_pexels   = 0
+n_card     = 0
 
 for i, (scene, dur, ap) in enumerate(zip(scenes, durations, audio_paths)):
     local_clip = f'/content/dark_files/clips/clip_{i:03d}.mp4'
@@ -725,47 +818,43 @@ for i, (scene, dur, ap) in enumerate(zip(scenes, durations, audio_paths)):
 
     if os.path.exists(local_clip):
         print(f'  {i+1}/{len(scenes)}  cached  ({dur:.1f}s)')
-        n_archive += 1
+        n_pexels += 1
         continue
 
     print(f'\\n  Scene {i+1}/{len(scenes)}  ({dur:.1f}s)')
     print(f'  {scene[:65]}...')
     used = False
 
-    kw     = _archive_kw(scene)
-    idents = _search(kw)
-    print(f'  Keywords: {kw}  ->  {len(idents)} candidates')
+    query  = _pexels_query(scene)
+    videos = _pexels_search(query)
+    print(f'  Query: "{query}"  ->  {len(videos)} results')
 
-    for ident in idents[:4]:
-        url = _mp4_url(ident)
-        if not url:
-            continue
-        raw = f'/content/dark_files/archive_raw/raw_{i:03d}.mp4'
-        print(f'    Trying: {ident}')
-        if _fetch_clip(url, raw, dur):
+    url = _best_url(videos)
+    if url:
+        raw = f'/content/dark_files/pexels_raw/raw_{i:03d}.mp4'
+        print(f'    Downloading clip ...')
+        if _fetch_pexels(url, raw, dur):
             _add_audio(raw, ap, local_clip, dur)
-            print(f'    Archive.org footage matched!')
-            n_archive += 1
+            print(f'    Pexels footage matched!')
+            n_pexels += 1
             used = True
-            break
-        time.sleep(0.5)
 
     if not used:
-        print(f'    No archive match — using dark document fallback')
-        doc = f'/content/dark_files/archive_raw/doc_{i:03d}.png'
-        raw = f'/content/dark_files/archive_raw/kb_{i:03d}.mp4'
-        _dark_doc(scene, doc)
-        _kb_arc(doc, raw, dur, idx=i)
+        print(f'    No footage — generating bright fact card')
+        card = f'/content/dark_files/pexels_raw/card_{i:03d}.png'
+        raw  = f'/content/dark_files/pexels_raw/kb_{i:03d}.mp4'
+        _fact_card(scene, card, ep_title=EPISODE_TITLE)
+        _kb_still(card, raw, dur, idx=i)
         _add_audio(raw, ap, local_clip, dur)
-        n_fallback += 1
+        n_card += 1
 
 _sep = '=' * 55
 print(f'\\n{_sep}')
-print(f'✅  All {len(scenes)} clips ready')
-print(f'   Archive.org real footage : {n_archive}')
-print(f'   Dark doc fallback        : {n_fallback}')
+print(f'Clips ready: {len(scenes)}')
+print(f'  Pexels HD footage : {n_pexels}')
+print(f'  Bright fact cards : {n_card}')
 print(f'{_sep}')
-print('\\nNext: Run Step 8 (Music). Skip Steps 6 and 7 — those are PATH B GPU steps.')
+print('\\nNext: Run Step 8 (Music). Skip Steps 6 and 7.')
 """)
 
 CELL_LOAD_MODEL = code("""\
