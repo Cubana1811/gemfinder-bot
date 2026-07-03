@@ -160,15 +160,41 @@ def _dur(path):
 async def _tts(text, apath, vpath):
     comm = edge_tts.Communicate(text, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH)
     sub  = edge_tts.SubMaker()
+    _words = []
     with open(apath, 'wb') as af:
         async for chunk in comm.stream():
-            if   chunk['type'] == 'audio': af.write(chunk['data'])
+            if chunk['type'] == 'audio':
+                af.write(chunk['data'])
             elif chunk['type'] == 'WordBoundary':
-                try:    sub.feed(chunk)
-                except: sub.create_sub((chunk['offset'], chunk['duration']), chunk['text'])
+                try: sub.feed(chunk)
+                except:
+                    try: sub.create_sub((chunk['offset'], chunk['duration']), chunk['text'])
+                    except: pass
+                try:
+                    _ws = chunk.get('offset', 0) / 10_000_000
+                    _wd = chunk.get('duration', 0) / 10_000_000
+                    _words.append((_ws, _ws + _wd, chunk.get('text', '')))
+                except: pass
     with open(vpath, 'w', encoding='utf-8') as vf:
-        try:    vf.write(sub.get_subs())
-        except: vf.write(sub.generate_subs())
+        _vtt = None
+        for _attr in ['get_subs', 'generate_subs', 'merge_subs', 'get_srt', 'get_vtt']:
+            if hasattr(sub, _attr):
+                try: _vtt = getattr(sub, _attr)(); break
+                except TypeError:
+                    try: _vtt = getattr(sub, _attr)(words_in_cue=10); break
+                    except: pass
+                except: pass
+        if _vtt:
+            vf.write(_vtt)
+        elif _words:
+            def _ts(s):
+                h,m,sc=int(s//3600),int((s%3600)//60),s%60
+                return f'{h:02d}:{m:02d}:{sc:06.3f}'
+            vf.write('WEBVTT\\n\\n')
+            for _wi,(_ws,_we,_wt) in enumerate(_words):
+                vf.write(f'{_wi+1}\\n{_ts(_ws)} --> {_ts(_we)}\\n{_wt}\\n\\n')
+        else:
+            vf.write('WEBVTT\\n\\n')
 
 print('Click Choose Files — select your script as a .txt file.')
 _up = _gcf.upload()
