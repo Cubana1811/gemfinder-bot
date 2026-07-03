@@ -1631,12 +1631,47 @@ Upload checklist:
 ''')
 """)
 
+# ── CELL 12: Save to Google Drive ─────────────────────────────────────────────
+
+CELL_DRIVE = code("""\
+# ── CELL 11: Save all files to Google Drive (for phone users) ─────────────────
+from google.colab import drive
+import shutil, os, glob
+
+print('Connecting to Google Drive...')
+drive.mount('/content/drive')
+
+if 'WORK_DIR' not in dir(): WORK_DIR = '/content/unlearned'
+
+_dest = '/content/drive/MyDrive/UNLEARNED_VIDEO'
+os.makedirs(_dest, exist_ok=True)
+print(f'Saving to Google Drive → UNLEARNED_VIDEO folder...\\n')
+
+_saved = []
+for _f in glob.glob(f'{WORK_DIR}/UNLEARNED_*.mp4'):
+    shutil.copy2(_f, _dest)
+    _mb = os.path.getsize(_f) / 1_048_576
+    print(f'  VIDEO   : {os.path.basename(_f)}  ({_mb:.1f} MB)')
+    _saved.append(_f)
+
+for _name in ['thumbnail.jpg','captions.srt','captions.ass',
+              'yt_description.txt','yt_chapters.txt']:
+    _src = f'{WORK_DIR}/{_name}'
+    if os.path.exists(_src):
+        shutil.copy2(_src, _dest)
+        print(f'  {_name}')
+        _saved.append(_src)
+
+print(f'\\nDone! {len(_saved)} files saved.')
+print('Open Google Drive app on your phone → UNLEARNED_VIDEO folder to download.')
+""")
+
 # ── Assemble notebook ──────────────────────────────────────────────────────────
 
 CELLS = [
     CELL_TITLE, CELL_INSTALL, CELL_SETUP, CELL_VOICE,
     CELL_DOODLE, CELL_MOTION, CELL_MUSIC, CELL_ASSEMBLE,
-    CELL_CAPTIONS, CELL_MIX, CELL_DOWNLOAD,
+    CELL_CAPTIONS, CELL_MIX, CELL_DOWNLOAD, CELL_DRIVE,
 ]
 
 NOTEBOOK = {
