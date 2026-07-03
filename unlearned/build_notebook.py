@@ -959,11 +959,70 @@ if not os.path.exists(_tc_path):
     _tc.save(_tc_path)
     print(f'Title card: {_tc_path}')
 
-# ── Thumbnail (title card as JPEG) ────────────────────────────────────────────
-_thumb_path = f'{WORK_DIR}/thumbnail.jpg'
-if not os.path.exists(_thumb_path) and os.path.exists(_tc_path):
-    Image.open(_tc_path).save(_thumb_path,'JPEG',quality=95)
-    print(f'Thumbnail : {_thumb_path}')
+# ── Eye-catching YouTube thumbnail ────────────────────────────────────────────
+def _thumb_gen():
+    W2, H2 = 1280, 720
+    _t  = Image.new('RGB', (W2, H2), (18, 20, 35))
+    _d2 = ImageDraw.Draw(_t)
+    # Diagonal stripe texture
+    for _xi in range(-H2, W2+H2, 24):
+        _d2.line([(_xi,0),(_xi+H2,H2)], fill=(26,28,47), width=1)
+    # Orange energy slash (right-side accent)
+    _d2.polygon([
+        (int(W2*0.53),0),(int(W2*0.69),0),
+        (W2,int(H2*0.42)),(W2,int(H2*0.58))
+    ], fill=(210,80,5))
+    # White spotlight circle (right panel)
+    _ccx, _ccy = int(W2*0.795), H2//2+22
+    _d2.ellipse([_ccx-218,_ccy-218,_ccx+218,_ccy+218], fill=(250,250,254))
+    # Large expressive stick figure
+    _RNG.seed(77)
+    _sc0_txt = SCENE_DATA[0]['text'] if SCENE_DATA else ''
+    _ex3 = _expr(_sc0_txt) if _sc0_txt else 'happy'
+    _sk3 = SKIN_TONES[0]
+    _hr3 = max(int(220*0.24), 14)
+    _fig_cy = _ccy - 72
+    _figure(_d2, _ccx, _fig_cy, 220, _ex3, skin_col=_sk3)
+    # Key-word badge above head (speech bubble style)
+    _kw3 = _stat(_sc0_txt)[:16] if _sc0_txt else 'MIND'
+    _kf3 = _font(30)
+    _kb3 = _d2.textbbox((0,0), _kw3, font=_kf3)
+    _kw3_w = _kb3[2]-_kb3[0]+32
+    _kbx = _ccx - _kw3_w//2
+    _kby = _fig_cy - _hr3 - 60
+    _d2.rectangle([_kbx, _kby, _kbx+_kw3_w, _kby+46], fill=C['yellow'])
+    _d2.polygon([(_ccx-9,_kby+46),(_ccx+9,_kby+46),(_ccx,_fig_cy-_hr3-6)],
+                fill=C['yellow'])
+    _d2.text((_kbx+16, _kby+8), _kw3, fill=C['black'], font=_kf3)
+    # Episode title (left panel) — auto-size
+    _ef3, _lh3 = _font(88), 106
+    _el3 = _wrap(EPISODE_TITLE.upper(), _d2, _ef3, int(W2*0.50)-20)
+    if len(_el3) > 3:
+        _ef3, _lh3 = _font(72), 88
+        _el3 = _wrap(EPISODE_TITLE.upper(), _d2, _ef3, int(W2*0.50)-20)
+    if len(_el3) > 4:
+        _ef3, _lh3 = _font(58), 72
+        _el3 = _wrap(EPISODE_TITLE.upper(), _d2, _ef3, int(W2*0.50)-20)
+    _ety = H2//2 - len(_el3)*_lh3//2 + 14
+    for _eln in _el3[:4]:
+        _ebb = _d2.textbbox((0,0), _eln, font=_ef3)
+        _d2.text((64+3, _ety+3), _eln, fill=(0,0,0), font=_ef3)   # drop shadow
+        _d2.text((64, _ety), _eln, fill=(255,255,255), font=_ef3)
+        _ety += _lh3
+    # Orange accent line under title
+    _d2.rectangle([60, _ety+10, min(int(W2*0.50)-30, 60+420), _ety+16], fill=C['orange'])
+    # UNLEARNED badge (top-left)
+    _uf3 = _font(28); _utxt = 'UNLEARNED'
+    _ub3 = _d2.textbbox((0,0), _utxt, font=_uf3)
+    _uw3 = _ub3[2]-_ub3[0]+40; _uh3 = _ub3[3]-_ub3[1]+18
+    _d2.rectangle([52, 34, 52+_uw3, 34+_uh3], fill=C['orange'])
+    _d2.text((52+20, 34+9), _utxt, fill=C['white'], font=_uf3)
+    # Bottom orange bar
+    _d2.rectangle([0, H2-10, W2, H2], fill=C['orange'])
+    _t.save(f'{WORK_DIR}/thumbnail.jpg', 'JPEG', quality=96)
+    print(f'Thumbnail : {WORK_DIR}/thumbnail.jpg')
+
+_thumb_gen()
 
 # ── End card image ─────────────────────────────────────────────────────────────
 _ec_path = f'{WORK_DIR}/end_card.png'
