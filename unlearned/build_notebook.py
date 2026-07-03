@@ -99,7 +99,7 @@ VOICE = 'en-US-AndrewNeural'       # default — male, calm, clear
 # VOICE = 'en-GB-RyanNeural'       # British male, authoritative
 
 VOICE_RATE  = '-5%'
-VOICE_PITCH = '0Hz'
+VOICE_PITCH = '+0Hz'
 MUSIC_VOL   = 0.14   # background music level (14%)
 
 print(f'Work dir  : {WORK_DIR}')
@@ -121,7 +121,7 @@ if 'AUDIO_DIR'   not in dir(): AUDIO_DIR   = f'{WORK_DIR}/audio'
 if 'IMG_DIR'     not in dir(): IMG_DIR     = f'{WORK_DIR}/images'
 if 'VOICE'       not in dir(): VOICE       = 'en-US-AndrewNeural'
 if 'VOICE_RATE'  not in dir(): VOICE_RATE  = '-5%'
-if 'VOICE_PITCH' not in dir(): VOICE_PITCH = '0Hz'
+if 'VOICE_PITCH' not in dir(): VOICE_PITCH = '+0Hz'
 os.makedirs(AUDIO_DIR, exist_ok=True); os.makedirs(IMG_DIR, exist_ok=True)
 
 print('''
