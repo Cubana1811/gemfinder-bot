@@ -30,21 +30,26 @@ CELL_TITLE = md("""\
 - Generates complete metadata: titles, description, tags, thumbnail text
 
 **🎬 SYSTEM 2 — Video Generator (After you have your script)**
-- Generates realistic motion video per scene (LTX-Video)
-- Professional deep voiceover (Microsoft Edge neural TTS)
-- Dark ambient background music (Meta MusicGen)
-- Cinematic fade transitions + synced captions
-- Dark Files color grade (cold blue, crushed blacks, film grain)
-- Exports YouTube-ready MP4
+
+Two video paths — choose one after Step 5:
+
+| | PATH A — Archive.org | PATH B — AI Generated |
+|---|---|---|
+| **GPU needed?** | No | Yes (T4) |
+| **Footage** | Real public domain archival footage | SDXL + SVD AI images |
+| **Best for** | Authentic investigative documentary | Full AI automation |
+| **Steps** | 5B → 6C → 8 → 9 → 10 → 11 → 12 → 13 | 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 |
+
+Both paths share: professional neural voiceover · dark ambient music · synced captions · Dark Files color grade
 
 ---
 ### ⚡ Before you start
-1. Click **Runtime → Change runtime type → T4 GPU → Save**
-2. **Run System 1 first** to find your episode topic
-3. **Research the unique angle** using Claude
-4. **Paste your script into Cell 8** and run System 2
+1. **PATH A (recommended):** No GPU needed — run as-is
+2. **PATH B:** Click Runtime → Change runtime type → T4 GPU → Save
+3. Run System 1 first to find your episode topic
+4. Upload your script in Step 3, then choose your path
 
-> ⏱️ Trend scan: ~3 min | Video generation: ~30–50 min on free T4 GPU
+> ⏱️ Trend scan: ~3 min | PATH A: ~15 min | PATH B: ~30–50 min on free T4 GPU
 """)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -531,6 +536,236 @@ print('Downloading now...')
 _cf.download(_out)
 print('\\nEach PROMPT mirrors the exact words from the voiceover.')
 print('Paste into Midjourney / DALL-E / Ideogram to generate the image.')
+""")
+
+CELL_ARCHIVE_FOOTAGE = code("""\
+# ── STEP 6C (PATH A): Real Archive.org Footage — No GPU needed ──────────────
+# Searches Archive.org Prelinger Archives + National Archives for real public
+# domain footage matched to each scene. Downloads only the seconds you need.
+#
+# PATH A users: run this INSTEAD of Steps 6 (Load Model) + 7 (Gen Clips).
+# Flow: 3 -> 4 -> 5 -> 5B -> 6C -> 8 -> 9 -> 10 -> 11 -> 12 -> 13
+# ─────────────────────────────────────────────────────────────────────────────
+import requests, json, os, re, subprocess, time
+from PIL import Image, ImageDraw, ImageFont
+
+os.makedirs('/content/dark_files/clips', exist_ok=True)
+os.makedirs('/content/dark_files/archive_raw', exist_ok=True)
+
+if 'scenes' not in dir() or 'durations' not in dir() or 'audio_paths' not in dir():
+    _jpath = '/content/dark_files/scene_data.json'
+    if not os.path.exists(_jpath):
+        raise RuntimeError('Run Step 5 (Voiceover) first — it creates scene_data.json.')
+    with open(_jpath) as _jf:
+        _sd = json.load(_jf)
+    scenes      = [x['text']     for x in _sd]
+    audio_paths = [x['audio']    for x in _sd]
+    durations   = [x['duration'] for x in _sd]
+    print(f'Recovered {len(scenes)} scenes from disk.')
+
+_COLLS = 'collection:(prelinger OR usnatarchivesav OR aroundtheworld)'
+_HDR   = {'User-Agent': 'DarkFilesBot/1.0 (educational colab notebook)'}
+
+_KW_MAP = [
+    (r'pilot|flight|aircraft|plane|cockpit|runway|aviator',  ['aircraft', 'flight', 'aviation']),
+    (r'military|army|soldier|troops|war|battle|combat',      ['military', 'war', 'soldiers']),
+    (r'government|federal|washington|capitol|congress',      ['government', 'washington']),
+    (r'court|trial|judge|jury|verdict|testif|lawyer',        ['courtroom', 'trial', 'justice']),
+    (r'city|street|urban|downtown|building|neighborhood',    ['city street', 'urban']),
+    (r'factory|industri|manufactur|plant|labor|worker',      ['factory', 'industrial', 'workers']),
+    (r'police|detective|crime|arrest|officer|sheriff',       ['police', 'law enforcement']),
+    (r'hospital|medical|doctor|nurse|patient|clinic',        ['hospital', 'medical']),
+    (r'ocean|sea|ship|boat|coast|naval|harbor',              ['ocean', 'ship', 'coast']),
+    (r'forest|tree|nature|wilderness|outdoor|rural',         ['forest', 'nature', 'landscape']),
+    (r'crowd|protest|demonstration|march|rally|strike',      ['crowd', 'demonstration']),
+    (r'document|file|record|paper|report|evidence',          ['documents', 'records']),
+    (r'prison|jail|incarcerat|cell|inmate',                  ['prison', 'jail']),
+    (r'school|student|education|classroom|teacher',          ['school', 'education']),
+    (r'family|home|domestic|community|house',                ['family', 'home']),
+    (r'news|press|media|journalist|headline|broadcast',      ['news', 'press', 'media']),
+    (r'phone|telephone|radio|signal|transmit',               ['telephone', 'radio', 'communication']),
+]
+
+_STOPS = {
+    'about','after','again','before','being','between','called','could','every',
+    'first','found','going','great','having','heard','never','other','still',
+    'their','there','these','those','through','under','where','which','while',
+    'would','years','because','without','another','during','since','until',
+}
+
+def _archive_kw(text):
+    low = text.lower()
+    for pat, kw_list in _KW_MAP:
+        if re.search(pat, low):
+            return kw_list
+    words = re.findall(r'\\b[a-zA-Z]{5,}\\b', text)
+    kw = [w for w in words if w.lower() not in _STOPS][:3]
+    return kw if kw else ['history', 'documentary']
+
+def _search(kw):
+    q = ' '.join(kw) + ' ' + _COLLS
+    try:
+        r = requests.get(
+            'https://archive.org/advancedsearch.php',
+            params={'q': q, 'output': 'json', 'fl': 'identifier,mediatype',
+                    'rows': '8', 'sort': 'downloads+desc', 'mediatype': 'movies'},
+            headers=_HDR, timeout=15,
+        )
+        r.raise_for_status()
+        docs = r.json().get('response', {}).get('docs', [])
+        return [d['identifier'] for d in docs if d.get('mediatype') == 'movies']
+    except Exception as e:
+        print(f'    search error: {e}')
+        return []
+
+def _mp4_url(ident):
+    try:
+        r = requests.get(
+            'https://archive.org/metadata/' + ident,
+            headers=_HDR, timeout=15,
+        )
+        r.raise_for_status()
+        files = r.json().get('files', [])
+        # Prefer small derivative mp4s (faster download)
+        for tag in ['512Kb', '256Kb', 'MPEG4']:
+            for fi in files:
+                if fi.get('name','').endswith('.mp4') and tag in fi.get('name',''):
+                    return 'https://archive.org/download/' + ident + '/' + fi['name']
+        for fi in files:
+            if fi.get('name','').endswith('.mp4') and fi.get('source') == 'derivative':
+                return 'https://archive.org/download/' + ident + '/' + fi['name']
+        for fi in files:
+            if fi.get('name','').endswith('.mp4'):
+                return 'https://archive.org/download/' + ident + '/' + fi['name']
+    except Exception as e:
+        print(f'    metadata error {ident}: {e}')
+    return None
+
+def _fetch_clip(url, out, dur, offset=45):
+    try:
+        res = subprocess.run([
+            'ffmpeg', '-y',
+            '-ss', str(offset), '-t', str(dur + 2), '-i', url,
+            '-vf', 'scale=1024:576:force_original_aspect_ratio=increase,crop=1024:576',
+            '-c:v', 'libx264', '-crf', '22', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+            '-an', out,
+        ], capture_output=True, timeout=120)
+        return (res.returncode == 0
+                and os.path.exists(out)
+                and os.path.getsize(out) > 10000)
+    except Exception as e:
+        print(f'    fetch error: {e}')
+        return False
+
+def _dark_doc(text, out_png):
+    W, H = 1024, 576
+    img  = Image.new('RGB', (W, H), (18, 18, 20))
+    draw = ImageDraw.Draw(img)
+    # aged paper page
+    draw.rectangle([60, 40, W-60, H-40], fill=(240, 232, 210), outline=(160, 140, 100), width=2)
+    # ruled lines
+    for y_ln in range(90, H-55, 26):
+        draw.line([(90, y_ln), (W-90, y_ln)], fill=(195, 182, 155), width=1)
+    # redaction bars
+    for bar_y in [108, 160, 212, 264]:
+        draw.rectangle([100, bar_y, W//2+60, bar_y+16], fill=(15, 15, 15))
+    # text excerpt
+    excerpt = text[:75].upper()
+    try:
+        fn  = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf', 13)
+        fn2 = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf', 11)
+    except Exception:
+        try:
+            fn = fn2 = ImageFont.load_default(size=13)
+        except TypeError:
+            fn = fn2 = ImageFont.load_default()
+    draw.text((102, 290), excerpt, fill=(35, 25, 15), font=fn)
+    # CLASSIFIED stamp
+    draw.rectangle([W-236, H-106, W-72, H-74], fill=(175, 18, 18))
+    draw.text((W-224, H-100), 'CLASSIFIED', fill=(255, 255, 255), font=fn2)
+    img.save(out_png)
+
+_KB_ARC = [
+    "zoompan=z='min(zoom+0.0010,1.4)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
+    "zoompan=z='min(zoom+0.0012,1.35)':x='min(iw-iw/zoom,iw/2-(iw/zoom/2)+in*0.3)':y='ih/2-(ih/zoom/2)'",
+    "zoompan=z='max(1.0,1.3-in*0.0012)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
+    "zoompan=z='min(zoom+0.0008,1.25)':x='iw/2-(iw/zoom/2)':y='max(0,ih/2-(ih/zoom/2)-in*0.15)'",
+]
+
+def _kb_arc(img_path, out, dur, idx=0):
+    fps = 25
+    fr  = max(int(dur * fps) + 2, 2)
+    eff = _KB_ARC[idx % len(_KB_ARC)]
+    res = subprocess.run([
+        'ffmpeg', '-y', '-loop', '1', '-i', img_path,
+        '-vf', f'{eff}:d={fr}:s=1024x576,fps={fps}',
+        '-c:v', 'libx264', '-crf', '20', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+        '-t', str(dur + 0.5), '-an', out,
+    ], capture_output=True)
+    return res.returncode == 0
+
+def _add_audio(vid, ap, out, dur):
+    subprocess.run([
+        'ffmpeg', '-y', '-i', vid, '-i', ap,
+        '-map', '0:v', '-map', '1:a',
+        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+        '-t', str(dur), out,
+    ], capture_output=True, check=True)
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+print(f'PATH A — Archive.org footage for {len(scenes)} scenes')
+print('Searching Prelinger Archives + National Archives ...\\n')
+clip_paths = []
+n_archive  = 0
+n_fallback = 0
+
+for i, (scene, dur, ap) in enumerate(zip(scenes, durations, audio_paths)):
+    local_clip = f'/content/dark_files/clips/clip_{i:03d}.mp4'
+    clip_paths.append(local_clip)
+
+    if os.path.exists(local_clip):
+        print(f'  {i+1}/{len(scenes)}  cached  ({dur:.1f}s)')
+        n_archive += 1
+        continue
+
+    print(f'\\n  Scene {i+1}/{len(scenes)}  ({dur:.1f}s)')
+    print(f'  {scene[:65]}...')
+    used = False
+
+    kw     = _archive_kw(scene)
+    idents = _search(kw)
+    print(f'  Keywords: {kw}  ->  {len(idents)} candidates')
+
+    for ident in idents[:4]:
+        url = _mp4_url(ident)
+        if not url:
+            continue
+        raw = f'/content/dark_files/archive_raw/raw_{i:03d}.mp4'
+        print(f'    Trying: {ident}')
+        if _fetch_clip(url, raw, dur):
+            _add_audio(raw, ap, local_clip, dur)
+            print(f'    Archive.org footage matched!')
+            n_archive += 1
+            used = True
+            break
+        time.sleep(0.5)
+
+    if not used:
+        print(f'    No archive match — using dark document fallback')
+        doc = f'/content/dark_files/archive_raw/doc_{i:03d}.png'
+        raw = f'/content/dark_files/archive_raw/kb_{i:03d}.mp4'
+        _dark_doc(scene, doc)
+        _kb_arc(doc, raw, dur, idx=i)
+        _add_audio(raw, ap, local_clip, dur)
+        n_fallback += 1
+
+_sep = '=' * 55
+print(f'\\n{_sep}')
+print(f'✅  All {len(scenes)} clips ready')
+print(f'   Archive.org real footage : {n_archive}')
+print(f'   Dark doc fallback        : {n_fallback}')
+print(f'{_sep}')
+print('\\nNext: Run Step 8 (Music). Skip Steps 6 and 7 — those are PATH B GPU steps.')
 """)
 
 CELL_LOAD_MODEL = code("""\
@@ -1184,7 +1419,8 @@ notebook = {
         CELL_SCRIPT,
         CELL_PARSER,
         CELL_VOICEOVER,
-        CELL_DARK_PROMPT_GEN,   # PATH A — image prompts (mirrors exact voiceover words)
+        CELL_DARK_PROMPT_GEN,   # PATH A — Step 5B: image prompts (mirrors exact voiceover words)
+        CELL_ARCHIVE_FOOTAGE,   # PATH A — Step 6C: real Archive.org footage (no GPU)
         CELL_LOAD_MODEL,
         CELL_GEN_CLIPS,
         CELL_MUSIC,
