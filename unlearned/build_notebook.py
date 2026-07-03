@@ -1,23 +1,24 @@
 """
-Build the Unlearned Video Generator Colab notebook — v5 (Perfect Edition).
+Build the Unlearned Video Generator Colab notebook — v6 (Perfect Edition).
 Run: python build_notebook.py
 Output: unlearned_generator.ipynb
 
-V5 vs V4:
-  - Chunk-based Karplus-Strong (100x faster — period-by-period numpy, not sample-by-sample)
-  - 16-bar music loop: C-G-Am-F (A) + Am-F-C-G (B) with ascending/descending melody line
-  - Per-clip white fade transitions (0.15 s) — clean scene cuts without xfade complexity
-  - 7 Ken Burns directions (was 5)
-  - 6 soft background palettes cycling per scene (ivory, mint, lavender, peach, ice-blue, white)
-  - 12 frame types (was 8): + timeline, quote_card, comparison, stat_bar
-  - Scoring-based frame type detection — replaces brittle if/elif chain
-  - VTT word grouping: 4 words per caption entry for comfortable reading
-  - ASS subtitle font size 28 (was 24) for mobile readability
-  - Figure accessories: graduation cap (idea/diagram), top hat (history)
-  - Figure shoes: small ellipses at feet for polish
-  - Scene props: book, screen, money-bag, heart based on keywords
-  - Scene preview: first 3 doodle images shown inline after cell 4
-  - Expanded keyword lists for psychology + history channel content
+V6 vs V5:
+  - Branded 3 s title card (dark navy + episode title + UNLEARNED badge)
+  - 4 s subscribe end card (bell icon, channel name, tags)
+  - YouTube thumbnail.jpg auto-generated
+  - yt_description.txt + yt_chapters.txt downloaded with video
+  - Music echo reverb (aecho 0.85:0.90:40:0.35)
+  - 5 skin-tone variations cycling per scene
+  - Dot-grid texture on soft/white backgrounds
+  - 13th frame type: numbered_list (colored circles + item text)
+  - Script formatting guide printed before upload
+  - Scene validation: warn <8 words or >25 words
+  - Voice selector in Setup (4 voices commented)
+  - Caption timing offset reads title_dur.txt
+  - Assemble prepends clip_title.mp4 + appends clip_end.mp4
+  - Mix reads title_dur.txt + end_dur.txt for correct fade timing
+  - Download: video + srt + ass + thumbnail + yt_description + yt_chapters
 """
 import json, os
 
@@ -33,24 +34,24 @@ def code(src):
 # ── CELL 1: Title ──────────────────────────────────────────────────────────────
 
 CELL_TITLE = md("""\
-# UNLEARNED — Automated Video Generator  v5 ✦ Perfect Edition
+# UNLEARNED — Automated Video Generator  v6 ✦ Perfect Edition
 ### Psychology · Ancient History · Behavioral Science
 
 | Cell | What it does |
 |------|-------------|
 | 1 | Install packages |
-| 2 | Setup |
+| 2 | Setup — voice selector, volume |
 | 3 | Upload `.txt` script → voiceover + word-timing VTT |
-| 4 | Doodle images — 12 frame types, 6 BG palettes, props, accessories |
-| 5 | Ken Burns motion clips with per-clip white-fade transitions |
-| 6 | Background music — chunk-KS harp, 16-bar loop + melody line |
-| 7 | Assemble clips |
-| 8 | Burn yellow ASS captions (4-word phrase sync, font 28) |
-| 9 | Mix audio + master fade in/out + loudnorm |
-| 10 | Download final MP4 + captions.srt |
+| 4 | Doodle images — 13 frame types, skin tones, dot-grid BG, title/end/thumbnail |
+| 5 | Ken Burns motion clips + title card clip + end card clip |
+| 6 | Background music — chunk-KS harp, 16-bar loop, echo reverb |
+| 7 | Assemble: title card + scenes + end card |
+| 8 | Burn yellow ASS captions (4-word sync, caption offset) |
+| 9 | Mix audio + loudnorm + white master fade |
+| 10 | Download MP4 + captions + thumbnail + YT description + chapters |
 
-**v5 highlights:** chunk-based KS music is ~100× faster · 12 scene types · 6 palette BGs ·
-props (book / screen / money / heart) · graduation-cap & hat accessories · smooth white scene cuts
+**v6 highlights:** branded intro/outro · thumbnail · YT description & chapters ·
+5 skin tones · dot-grid BG · numbered-list frame · echo music · caption offset
 """)
 
 # ── CELL 2: Install ────────────────────────────────────────────────────────────
@@ -90,10 +91,15 @@ CLIP_DIR  = f'{WORK_DIR}/clips'
 for _d in [WORK_DIR, IMG_DIR, AUDIO_DIR, CLIP_DIR]:
     os.makedirs(_d, exist_ok=True)
 
-VOICE        = 'en-US-AndrewNeural'
-VOICE_RATE   = '-5%'
-VOICE_PITCH  = '0Hz'
-MUSIC_VOL    = 0.14   # background music level (14 %)
+# ── Voice selector (uncomment one) ───────────────────────────────────────────
+VOICE = 'en-US-AndrewNeural'       # default — male, calm, clear
+# VOICE = 'en-US-JennyNeural'      # female, friendly
+# VOICE = 'en-US-GuyNeural'        # male, professional
+# VOICE = 'en-GB-RyanNeural'       # British male, authoritative
+
+VOICE_RATE  = '-5%'
+VOICE_PITCH = '0Hz'
+MUSIC_VOL   = 0.14   # background music level (14%)
 
 print(f'Work dir  : {WORK_DIR}')
 print(f'Voice     : {VOICE}  rate={VOICE_RATE}  pitch={VOICE_PITCH}')
@@ -116,6 +122,18 @@ if 'VOICE'       not in dir(): VOICE       = 'en-US-AndrewNeural'
 if 'VOICE_RATE'  not in dir(): VOICE_RATE  = '-5%'
 if 'VOICE_PITCH' not in dir(): VOICE_PITCH = '0Hz'
 os.makedirs(AUDIO_DIR, exist_ok=True); os.makedirs(IMG_DIR, exist_ok=True)
+
+print('''
+SCRIPT FORMATTING GUIDE
+────────────────────────────────────────────────────────
+• Write in plain paragraphs — no headers, no bullet points
+• Each sentence should be complete and natural-sounding
+• Aim for 10-22 words per sentence
+• Do NOT write timestamps, scene numbers, or speaker labels
+• One concept per sentence/paragraph works best
+• Optimal length: 800-1500 words  (~5-8 min video)
+────────────────────────────────────────────────────────
+''')
 
 def _parse(text, max_words=22):
     text  = re.sub(r'[ \\t]+', ' ', text.strip())
@@ -185,13 +203,27 @@ with open(f'{WORK_DIR}/scene_data.json','w') as _f:
     json.dump(SCENE_DATA, _f, indent=2, ensure_ascii=False)
 _total = sum(s['duration'] for s in SCENE_DATA)
 print(f'\\nTotal: {_total:.0f}s ({_total/60:.1f} min) | {len(SCENE_DATA)} scenes')
+
+# ── Scene validation ───────────────────────────────────────────────────────────
+_warns = []
+for _si, _sc in enumerate(SCENE_DATA):
+    _wc = len(_sc['text'].split())
+    if _wc < 8:
+        _warns.append(f'  Scene {_si+1}: very short ({_wc} words) — "{_sc["text"][:40]}"')
+    elif _wc > 25:
+        _warns.append(f'  Scene {_si+1}: long ({_wc} words) — consider splitting')
+if _warns:
+    print(f'\\nWarnings ({len(_warns)}):')
+    for _w in _warns: print(_w)
+else:
+    print('\\nAll scenes: word count OK.')
 print('Voiceover done. Run Cell 4.')
 """)
 
-# ── CELL 5: PIL Doodle Images (v5) ────────────────────────────────────────────
+# ── CELL 5: PIL Doodle Images (v6) ────────────────────────────────────────────
 
 CELL_DOODLE = code("""\
-# ── CELL 4: Doodle Images v5 — 12 frame types, 6 BG palettes, props ──────────
+# ── CELL 4: Doodle Images v6 — 13 frame types, skin tones, dot-grid, cards ───
 import json, os, re, math, random
 from PIL import Image, ImageDraw, ImageFont
 
@@ -202,13 +234,16 @@ if 'SCENE_DATA' not in dir():
     _jp = f'{WORK_DIR}/scene_data.json'
     if not os.path.exists(_jp): raise RuntimeError('Run Cell 3 first.')
     with open(_jp) as _f: SCENE_DATA = json.load(_f)
+if 'EPISODE_TITLE' not in dir():
+    _ep_f = f'{WORK_DIR}/episode_title.txt'
+    EPISODE_TITLE = open(_ep_f).read().strip() if os.path.exists(_ep_f) else 'UNLEARNED EPISODE'
 
 W, H = 1280, 720
-DZ_TOP = 30          # top of drawing zone
-DZ_BOT = 548         # bottom of drawing zone (ASS captions sit below ~560)
-DZ_MID = (DZ_TOP + DZ_BOT) // 2   # = 289 — vertical centre
+DZ_TOP = 30
+DZ_BOT = 548
+DZ_MID = (DZ_TOP + DZ_BOT) // 2
 
-# ── Palette definitions ────────────────────────────────────────────────────────
+# ── Colour palette ─────────────────────────────────────────────────────────────
 C = {
     'orange': (245,130, 13), 'blue':  ( 45, 95,191), 'green': ( 58,158, 58),
     'yellow': (245,197, 24), 'red':   (217, 64, 64), 'brown': (139, 94, 60),
@@ -217,14 +252,20 @@ C = {
     'dgray':  (150,150,150), 'lblue': (200,220,255), 'pink':  (255,182,193),
     'purple': (128, 80,200), 'teal':  ( 32,178,170), 'gold':  (212,175, 55),
 }
-# 6 soft scene backgrounds (cycle by scene index when no keyword match)
 SOFT_BG = [
-    (255,255,255),   # 0 classic white
-    (255,252,242),   # 1 warm ivory
-    (242,255,248),   # 2 mint
-    (248,244,255),   # 3 lavender
-    (255,246,238),   # 4 peach
-    (238,248,255),   # 5 ice blue
+    (255,255,255),
+    (255,252,242),
+    (242,255,248),
+    (248,244,255),
+    (255,246,238),
+    (238,248,255),
+]
+SKIN_TONES = [
+    (255,210,165),
+    (240,184,120),
+    (198,134, 66),
+    (141, 85, 36),
+    (255,224,189),
 ]
 
 # ── Font helper ────────────────────────────────────────────────────────────────
@@ -248,9 +289,9 @@ def _wrap(text, draw, font, max_w):
     if buf: lines.append(' '.join(buf))
     return lines or ['']
 
-_RNG = random.Random()   # seeded per scene for deterministic wobble
+_RNG = random.Random()
 
-# ── BÉZIER PRIMITIVES ─────────────────────────────────────────────────────────
+# ── Bézier primitives ──────────────────────────────────────────────────────────
 def _sl(draw, x1, y1, x2, y2, fill, width=3, wob=3):
     x1,y1,x2,y2 = int(x1),int(y1),int(x2),int(y2)
     dx,dy = x2-x1, y2-y1
@@ -297,7 +338,7 @@ def _sp(draw, pts, fill=None, outline=None, width=3, wob=2):
             _sl(draw, ipts[k][0],ipts[k][1], ipts[(k+1)%len(ipts)][0],ipts[(k+1)%len(ipts)][1],
                 outline, width, wob)
 
-# ── BACKGROUND ────────────────────────────────────────────────────────────────
+# ── Background ─────────────────────────────────────────────────────────────────
 def _fill_bg(draw, text, idx=0):
     w = text.lower()
     if any(x in w for x in ['ancient','prehistoric','cave','stone age','neanderthal',
@@ -337,31 +378,30 @@ def _fill_bg(draw, text, idx=0):
         for gx in range(0,W,65): draw.line([gx,0,gx,H], fill=(40,60,130),width=1)
         for gy in range(0,H,65): draw.line([0,gy,W,gy], fill=(40,60,130),width=1)
         return 'dark_blue'
-    # Default: soft palette, cycling per scene
     bg = SOFT_BG[idx % len(SOFT_BG)]
     draw.rectangle([0,0,W,H], fill=bg)
+    _dot = tuple(max(0,c-18) for c in bg)
+    for _gy in range(0,H,36):
+        for _gx in range(0,W,36):
+            draw.ellipse([_gx-2,_gy-2,_gx+2,_gy+2], fill=_dot)
     return 'soft'
 
-# ── FRAME TYPE — scoring system (12 types) ────────────────────────────────────
+# ── Frame type — scoring (13 types) ───────────────────────────────────────────
 def _frame_type(text, idx=0):
     w  = text.lower()
     sc = {k:0 for k in ['concept_text','evolution','villain','reaction','globe',
                           'diagram','idea','timeline','quote_card','comparison',
-                          'stat_bar','scene']}
-    # Number facts
+                          'stat_bar','numbered_list','scene']}
     if re.search(r'\\b\\d[\\d,]*\\s*(million|thousand|billion|year|day|hour|minute|second)', w):
         sc['concept_text'] += 4
-    # Percentages → bar chart
     if re.search(r'\\b\\d+\\s*(%|percent)\\b', w): sc['stat_bar'] += 4
     if any(x in w for x in ['survey','study found','research shows','majority','statistics',
                               'according to a study','scientists found','data shows']):
         sc['stat_bar'] += 2
-    # Evolution / transformation
     for kw in ['evolv','transform','stages','progress','develop','became','sequence',
                'steps','million year','from ape','over time','gradually','generation',
                'mutation','adaptation','selection','species changed']:
         if kw in w: sc['evolution'] += 2
-    # Psychology villain (brain)
     for kw in ['brain','stress','anxiety','dopamine','cortisol','ego','addiction','trauma',
                'amygdala','serotonin','cortex','priming','placebo','bias','neuron',
                'cognitive','phobia','depression','paranoia','subconscious','unconscious',
@@ -369,41 +409,38 @@ def _frame_type(text, idx=0):
                'impostor','dissonance','attention','loss aversion','sunk cost',
                'negativity bias','optimism bias','recency bias','availability']:
         if kw in w: sc['villain'] += 2
-    # Timeline / history
     if re.search(r'\\b(\\d{2,4})\\s*(bc|ad|ce|bce|century|decade)\\b', w): sc['timeline'] += 4
     for kw in ['history','century','decade','era','period','civilization','empire',
                'dynasty','revolution','ancient world','timeline','years ago',
                'discovered in','invented in','founded in','born in']:
         if kw in w: sc['timeline'] += 2
-    # Quote card
     if '"' in text or '\\u201c' in text or '\\u201d' in text: sc['quote_card'] += 5
     for kw in ['said','stated','according to','wrote','believed','once said',
                'declared','claimed','argued','noted','observed']:
         if kw in w: sc['quote_card'] += 2
-    # Comparison
     for kw in ['versus','vs.','compared to','difference between','unlike','however',
                'on the other hand','whereas','instead of','rather than','contrast',
                'while the other','one group','another group','group a','group b']:
         if kw in w: sc['comparison'] += 2
-    # Reaction / wonder
     for kw in ['why','wonder','confus','strange','but wait','hmm','believe it',
                'how is that','did you know','turns out','surprisingly','hard to believe',
                'would you believe','here is the thing','actually','in fact']:
         if kw in w: sc['reaction'] += 2
-    # Globe
     for kw in ['world','globe','earth','everywhere','planet','global','species',
                'continent','across','universal','worldwide','humanity','entire planet']:
         if kw in w: sc['globe'] += 2
-    # Diagram / definition
     for kw in ['called','known as','labeled','type of','named','kind of',
                'defined as','refers to','this is called','we call it','term for']:
         if kw in w: sc['diagram'] += 2
-    # Idea / discovery
     for kw in ['idea','discover','realiz','invent','insight','aha','eureka',
                'thought of','came up with','figured out','breakthrough','solution',
                'innovate','concept','first time','pioneered']:
         if kw in w: sc['idea'] += 2
-    sc['scene'] = 1   # baseline
+    if re.search(r'\\b[1-5]\\.\\s', text): sc['numbered_list'] += 5
+    for kw in ['first','second','third','fourth','fifth',
+               'step','steps','ways','reasons','habits','rules','tips','things']:
+        if kw in w: sc['numbered_list'] += 2
+    sc['scene'] = 1
     return max(sc, key=sc.get)
 
 def _expr(text):
@@ -420,9 +457,10 @@ def _expr(text):
         return 'scared'
     return 'neutral'
 
-# ── STICK FIGURE ──────────────────────────────────────────────────────────────
-def _figure(draw, cx, cy, size=120, expr='neutral', col=None, accessory=None):
-    col  = col or C['black']
+# ── Stick figure ───────────────────────────────────────────────────────────────
+def _figure(draw, cx, cy, size=120, expr='neutral', col=None, accessory=None, skin_col=None):
+    col      = col or C['black']
+    skin_col = skin_col or C['skin']
     hr   = max(int(size*0.24), 14)
     lw   = max(int(size*0.05), 3)
     ew   = max(int(hr*0.17), 3)
@@ -433,7 +471,7 @@ def _figure(draw, cx, cy, size=120, expr='neutral', col=None, accessory=None):
     bow  = int(hr*0.54)
     broy = cy - eyo - int(hr*0.22)
 
-    _se(draw, cx, cy, hr, hr, col, C['skin'], lw, 2)
+    _se(draw, cx, cy, hr, hr, col, skin_col, lw, 2)
     draw.ellipse([cx-exo-ew, cy-eyo-ew, cx-exo+ew, cy-eyo+ew], fill=col)
     draw.ellipse([cx+exo-ew, cy-eyo-ew, cx+exo+ew, cy-eyo+ew], fill=col)
 
@@ -468,11 +506,9 @@ def _figure(draw, cx, cy, size=120, expr='neutral', col=None, accessory=None):
         _sl(draw, cx+exo-2,broy, cx+bow-5,broy, col,lw,1)
         _sl(draw, cx-ms//2,cy+mby, cx+ms//2,cy+mby, col,lw,1)
 
-    # Body
     neck_y = cy+hr; body_b = cy+hr+int(size*0.56)
     _sl(draw, cx,neck_y, cx,body_b, col,lw,2)
 
-    # Arms
     arm_y = cy+hr+int(size*0.22)
     if expr == 'happy':
         for _sd in [-1,1]:
@@ -490,22 +526,18 @@ def _figure(draw, cx, cy, size=120, expr='neutral', col=None, accessory=None):
             _sl(draw, cx,arm_y, _elx,_ely, col,lw,2)
             _sl(draw, _elx,_ely, _hx,_hy, col,lw,2)
 
-    # Legs with knees
     for _sd in [-1,1]:
         _kx = cx+_sd*int(size*0.18); _ky = body_b+int(size*0.22)
         _fx = cx+_sd*int(size*0.30); _fy = body_b+int(size*0.44)
         _sl(draw, cx,body_b, _kx,_ky, col,lw,2)
         _sl(draw, _kx,_ky, _fx,_fy, col,lw,2)
-        # Shoes
         _sw2 = int(size*0.12)
         draw.ellipse([_fx-_sw2, _fy-4, _fx+_sw2+6, _fy+int(size*0.05)], fill=C['black'])
 
-    # Ground shadow
     _sw = int(size*0.38); _sh2 = max(int(size*0.05),3)
     _sby = body_b+int(size*0.44)+_sh2+6
     draw.ellipse([cx-_sw,_sby-_sh2,cx+_sw,_sby+_sh2], fill=C['dgray'])
 
-    # Accessories
     brim_y = cy-hr-4
     if accessory == 'graduation':
         draw.rectangle([cx-hr-8, brim_y-3, cx+hr+8, brim_y+4], fill=C['black'])
@@ -520,7 +552,7 @@ def _figure(draw, cx, cy, size=120, expr='neutral', col=None, accessory=None):
 
     return body_b + int(size*0.44)
 
-# ── PROPS ─────────────────────────────────────────────────────────────────────
+# ── Props ──────────────────────────────────────────────────────────────────────
 def _prop_book(draw, x, y, s=46):
     _sp(draw,[(x-s,y-s//2),(x,y-s//2+5),(x,y+s//2+5),(x-s,y+s//2)],
         fill=C['brown'],outline=C['black'],width=2,wob=1)
@@ -535,7 +567,6 @@ def _prop_screen(draw, x, y, s=62):
     draw.rectangle([x-s+5,y-s//2+5,x+s-5,y+s//3-5], fill=C['lblue'])
     _sl(draw,x,y+s//3,x,y+s//2,C['black'],4,1)
     _sl(draw,x-18,y+s//2,x+18,y+s//2,C['black'],4,1)
-    # Screen text lines
     for _ly in range(y-s//2+14, y+s//3-10, 12):
         _sl(draw,x-s+12,_ly,x+s-12,_ly,C['blue'],2,0)
 
@@ -552,7 +583,7 @@ def _prop_money(draw, x, y, s=36):
     f=_font(26); bb=draw.textbbox((0,0),'$',font=f)
     draw.text((x-(bb[2]-bb[0])//2,y-(bb[3]-bb[1])//2-3),'$',fill=C['yellow'],font=f)
 
-# ── THOUGHT BUBBLE ────────────────────────────────────────────────────────────
+# ── Thought bubble ─────────────────────────────────────────────────────────────
 def _bubble(draw, cx, cy, hr, snippet):
     bx=cx+hr+22; by=cy-hr-95
     bw=min(290,W-bx-22); bh=84
@@ -569,7 +600,7 @@ def _bubble(draw, cx, cy, hr, snippet):
         _r=5; _dy=cy-hr-_yoff
         draw.ellipse([_dx-_r,_dy-_r,_dx+_r,_dy+_r],fill=C['black'])
 
-# ── HOURGLASS ─────────────────────────────────────────────────────────────────
+# ── Hourglass ──────────────────────────────────────────────────────────────────
 def _hourglass(draw, cx, cy, s=100):
     s2=s//2
     _sp(draw,[(cx,cy-s2),(cx-s2,cy-s),(cx+s2,cy-s)],fill=C['yellow'],outline=C['black'],width=3)
@@ -580,7 +611,7 @@ def _hourglass(draw, cx, cy, s=100):
     _sl(draw,cx-7,cy-s2,cx+7,cy-s2,C['black'],3)
     _sl(draw,cx-7,cy+s2,cx+7,cy+s2,C['black'],3)
 
-# ── GLOBE ─────────────────────────────────────────────────────────────────────
+# ── Globe ──────────────────────────────────────────────────────────────────────
 def _globe(draw, cx, cy, r=105):
     _se(draw,cx,cy,r,r,C['black'],C['blue'],4,2)
     for bx1,by1,bx2,by2 in [(-r//3,-r//2,r//3,4),(-r//2,2,-r//8,r//2),(r//8,r//4,r//2,r//2)]:
@@ -591,7 +622,7 @@ def _globe(draw, cx, cy, r=105):
         if _hw>4: _sarc(draw,cx,_oy,_hw,10,0,180,(255,255,255),2,1)
     _se(draw,cx,cy,r,r,C['black'],None,4,2)
 
-# ── ARROW ─────────────────────────────────────────────────────────────────────
+# ── Arrow ──────────────────────────────────────────────────────────────────────
 def _arrow(draw, x1, y1, x2, y2, label):
     _sl(draw,x1,y1,x2,y2,C['yellow'],7,1)
     ang=math.atan2(y2-y1,x2-x1); ahl=22
@@ -601,7 +632,7 @@ def _arrow(draw, x1, y1, x2, y2, label):
     f=_font(32); bb=draw.textbbox((0,0),label.upper(),font=f)
     draw.text((x2+18,y2-(bb[3]-bb[1])//2),label.upper(),fill=C['black'],font=f)
 
-# ── LIGHTBULB ─────────────────────────────────────────────────────────────────
+# ── Lightbulb ──────────────────────────────────────────────────────────────────
 def _lightbulb(draw, cx, cy, size=68):
     r=size//2
     _se(draw,cx,cy-r//2,r,r,C['black'],C['yellow'],3,2)
@@ -615,7 +646,7 @@ def _lightbulb(draw, cx, cy, size=68):
         _sl(draw,int(cx+(r+4)*math.cos(_rad)),int(cy-r//2+(r+4)*math.sin(_rad)),
                   int(cx+(r+16)*math.cos(_rad)),int(cy-r//2+(r+16)*math.sin(_rad)),C['yellow'],2,0)
 
-# ── BRAIN VILLAIN ─────────────────────────────────────────────────────────────
+# ── Brain villain ──────────────────────────────────────────────────────────────
 def _villain(draw, cx, cy, label):
     r=95
     _se(draw,cx,cy,r,r,C['black'],C['blue'],5,3)
@@ -627,7 +658,6 @@ def _villain(draw, cx, cy, label):
     _sl(draw,cx-46,cy-37,cx-22,cy-22,C['black'],4,1)
     _sl(draw,cx+22,cy-22,cx+46,cy-37,C['black'],4,1)
     _sarc(draw,cx,cy+15,34,22,0,180,C['black'],4,1)
-    # Neural connection sparks
     for _ang in range(0,360,45):
         _rad=math.radians(_ang); _r1=r+4; _r2=r+22
         _sl(draw,int(cx+_r1*math.cos(_rad)),int(cy+_r1*math.sin(_rad)),
@@ -635,12 +665,13 @@ def _villain(draw, cx, cy, label):
     f=_font(44); lb=label.upper(); bb=draw.textbbox((0,0),lb,font=f)
     draw.text(((W-(bb[2]-bb[0]))//2, DZ_TOP+8), lb, fill=C['red'], font=f)
 
-# ── EVOLUTION ROW ─────────────────────────────────────────────────────────────
-def _evo_row(draw, fig_y=DZ_MID):
+# ── Evolution row ──────────────────────────────────────────────────────────────
+def _evo_row(draw, fig_y=DZ_MID, skin_col=None):
+    skin_col = skin_col or C['skin']
     xs=[W//6,W//2,5*W//6]; lbs=['EARLY','MIDDLE','NOW']
     szs=[76,92,110]; exs=['neutral','neutral','happy']
     for i,(px,lb,sz,ex) in enumerate(zip(xs,lbs,szs,exs)):
-        _figure(draw,px,fig_y,sz,ex)
+        _figure(draw,px,fig_y,sz,ex,skin_col=skin_col)
         f=_font(26); bb=draw.textbbox((0,0),lb,font=f)
         draw.text((px-(bb[2]-bb[0])//2, fig_y+sz+18), lb, fill=C['black'],font=f)
         if i<2:
@@ -648,9 +679,8 @@ def _evo_row(draw, fig_y=DZ_MID):
             _sl(draw,ax1,fig_y,ax2,fig_y,C['black'],5,1)
             draw.polygon([(ax2+14,fig_y),(ax2-4,fig_y-11),(ax2-4,fig_y+11)],fill=C['black'])
 
-# ── TIMELINE (NEW) ────────────────────────────────────────────────────────────
+# ── Timeline ───────────────────────────────────────────────────────────────────
 def _timeline(draw, text):
-    # Extract dates/labels
     years = re.findall(r'\\b(\\d{2,4})\\s*(BC|AD|BCE|CE)?\\b', text)
     labels = [f"{y} {s}".strip() for y,s in years if 10<=int(y)<=2100][:5]
     if len(labels)<2:
@@ -662,9 +692,7 @@ def _timeline(draw, text):
     labels = labels[:5]
     n  = len(labels)
     x0 = 110; x1 = W-130; y = DZ_MID
-    # Main axis line
     _sl(draw, x0,y, x1,y, C['black'], 5, 1)
-    # Arrow head
     draw.polygon([(x1+16,y),(x1-2,y-10),(x1-2,y+10)],fill=C['black'])
     f2=_font(22); f3=_font(20)
     draw.text((x1+22,y-11),'TIME',fill=C['blue'],font=f2)
@@ -680,42 +708,35 @@ def _timeline(draw, text):
         else:
             _sl(draw,x,y+18,x,y+36,C['black'],2,0)
             draw.text((max(x-tw//2,8),y+40),label,fill=C['black'],font=f3)
-    # Top label
     _top_label(draw,'TIMELINE',C['blue'])
 
-# ── QUOTE CARD (NEW) ──────────────────────────────────────────────────────────
+# ── Quote card ─────────────────────────────────────────────────────────────────
 def _quote_card(draw, text):
     fq=_font(120)
     draw.text((50, DZ_TOP+14), '\\u201c', fill=C['blue'], font=fq)
-    # Centre text
-    f=_font(34); words=text.split()
+    f=_font(34)
     clean=re.sub(r'[\\u201c\\u201d"\\u0022]','',text)[:110]
-    lines=_wrap(clean[:110], draw, f, W-240)
+    lines=_wrap(clean, draw, f, W-240)
     y=DZ_MID-(len(lines)*46)//2
     for line in lines:
         bb=draw.textbbox((0,0),line,font=f)
         draw.text(((W-(bb[2]-bb[0]))//2, y), line, fill=C['black'], font=f)
         y+=50
-    # Closing mark
     fq2=_font(80)
     draw.text((W-100, y+10), '\\u201d', fill=C['blue'], font=fq2)
-    # Decorative underline
     _sl(draw,W//2-90,y+36,W//2+90,y+36,C['blue'],3,1)
 
-# ── COMPARISON (NEW) ──────────────────────────────────────────────────────────
-def _comparison(draw, text, expr='neutral'):
+# ── Comparison ─────────────────────────────────────────────────────────────────
+def _comparison(draw, text, expr='neutral', skin_col=None):
+    skin_col = skin_col or C['skin']
     mid=W//2
-    # Divider line
     _sl(draw,mid,DZ_TOP+40,mid,DZ_BOT-20,C['red'],4,1)
-    # VS badge
     f=_font(50); bb=draw.textbbox((0,0),'VS',font=f)
     tw,th=bb[2]-bb[0],bb[3]-bb[1]
     draw.rectangle([mid-tw//2-12,DZ_MID-th//2-8,mid+tw//2+12,DZ_MID+th//2+8],fill=C['red'])
     draw.text((mid-tw//2,DZ_MID-th//2-2),'VS',fill=C['white'],font=f)
-    # Two figures
-    _figure(draw,W//4,DZ_MID,100,'happy')
-    _figure(draw,3*W//4,DZ_MID,100,'sad')
-    # Side labels from text split
+    _figure(draw,W//4,DZ_MID,100,'happy',skin_col=skin_col)
+    _figure(draw,3*W//4,DZ_MID,100,'sad',skin_col=skin_col)
     parts=re.split(r'\\b(vs\\.?|versus|compared to|but|while|whereas|however)\\b',
                    text,maxsplit=1,flags=re.I)
     f2=_font(24)
@@ -728,7 +749,7 @@ def _comparison(draw, text, expr='neutral'):
             draw.text((sx-(bb[2]-bb[0])//2,yy),ln,fill=C['black'],font=f2)
             yy+=30
 
-# ── STAT BAR CHART (NEW) ──────────────────────────────────────────────────────
+# ── Stat bar chart ─────────────────────────────────────────────────────────────
 def _stat_bar(draw, text):
     pcts=re.findall(r'(\\d+)\\s*(?:percent|%)',text.lower())
     if len(pcts)>=2:
@@ -750,7 +771,33 @@ def _stat_bar(draw, text):
         draw.text((x+bw//2-(bb[2]-bb[0])//2,cb-bh-36),label,fill=col,font=f)
     _top_label(draw,'STATS',C['blue'])
 
-# ── TOP LABEL / WATERMARK ─────────────────────────────────────────────────────
+# ── Numbered list (NEW) ────────────────────────────────────────────────────────
+def _numbered_list(draw, text):
+    _items = re.split(r'[,;]|\\band\\b|\\bor\\b|\\bthen\\b', text)
+    _items = [i.strip() for i in _items if len(i.strip()) > 3][:5]
+    if not _items:
+        _wds = text.split()
+        _items = [' '.join(_wds[i:i+4]) for i in range(0,min(len(_wds),20),4)][:5]
+    _bcols = [C['orange'],C['blue'],C['green'],C['red'],C['purple']]
+    _y = DZ_TOP + 52
+    _fn = _font(28)
+    for _ni, _itm in enumerate(_items[:5]):
+        _bc = _bcols[_ni % len(_bcols)]
+        _cx2, _cy2 = 88, _y + 22
+        draw.ellipse([_cx2-24,_cy2-24,_cx2+24,_cy2+24], fill=_bc)
+        _nf = _font(26); _ns = str(_ni+1)
+        _nb = draw.textbbox((0,0), _ns, font=_nf)
+        draw.text((_cx2-(_nb[2]-_nb[0])//2, _cy2-(_nb[3]-_nb[1])//2), _ns,
+                  fill=C['white'], font=_nf)
+        _lns = _wrap(_itm.strip()[:60], draw, _fn, W-185)
+        _ty = _y + 6
+        for _ln in _lns[:2]:
+            draw.text((132, _ty), _ln, fill=C['black'], font=_fn)
+            _ty += 34
+        _y += max(74, _ty - _y + 10)
+    _top_label(draw, 'HOW IT WORKS', C['blue'])
+
+# ── Top label / watermark ──────────────────────────────────────────────────────
 def _top_label(draw, text, col=None):
     col=col or C['black']; f=_font(44)
     bb=draw.textbbox((0,0),text.upper(),font=f)
@@ -773,13 +820,13 @@ def _stat(text):
                                   'could','should','being','every','which','these'}]
     return words[0].upper() if words else 'FACT'
 
-# ── RENDER LOOP ───────────────────────────────────────────────────────────────
+# ── Render loop ────────────────────────────────────────────────────────────────
 _n=len(SCENE_DATA)
 _exist=sum(1 for s in SCENE_DATA if os.path.exists(s['image']))
 if _exist==_n:
-    print(f'All {_n} images already on disk. Run Cell 5.')
+    print(f'All {_n} images already on disk.')
 else:
-    print(f'Drawing {_n} doodle images (v5: 12 frame types, 6 palettes, props)...')
+    print(f'Drawing {_n} doodle images (v6: 13 frame types, 5 skin tones, dot-grid)...')
     for _i, _sc in enumerate(SCENE_DATA):
         _out=_sc['image']
         if os.path.exists(_out): print(f'  [{_i+1}/{_n}] cached'); continue
@@ -792,6 +839,7 @@ else:
         _ft =_frame_type(_txt,_i)
         _ex =_expr(_txt)
         _mx =W//2; _my=DZ_MID
+        _sk =SKIN_TONES[_i % len(SKIN_TONES)]
 
         if _ft=='concept_text':
             _hourglass(_d,_mx,_my,98)
@@ -804,7 +852,7 @@ else:
             _stat_bar(_d,_txt)
 
         elif _ft=='evolution':
-            _evo_row(_d,fig_y=_my)
+            _evo_row(_d,fig_y=_my,skin_col=_sk)
 
         elif _ft=='villain':
             _kws=[w for w in re.findall(r'\\b[A-Za-z]{4,}\\b',_txt)
@@ -817,7 +865,7 @@ else:
 
         elif _ft=='reaction':
             _fhr=max(int(120*0.24),14)
-            _figure(_d,_mx,_my,120,'neutral')
+            _figure(_d,_mx,_my,120,'neutral',skin_col=_sk)
             _bubble(_d,_mx,_my,_fhr,_txt[:30])
 
         elif _ft=='globe':
@@ -830,24 +878,25 @@ else:
             _quote_card(_d,_txt)
 
         elif _ft=='comparison':
-            _comparison(_d,_txt,_ex)
+            _comparison(_d,_txt,_ex,skin_col=_sk)
 
         elif _ft=='diagram':
-            _fy=_my
-            _figure(_d,int(W*0.60),_fy,108,_ex,accessory='graduation')
+            _figure(_d,int(W*0.60),_my,108,_ex,accessory='graduation',skin_col=_sk)
             _lb_kws=[w for w in re.findall(r'\\b[A-Za-z]{4,}\\b',_txt)
                      if w.lower() not in {'this','that','they','them','with','from',
                                            'have','been','were','would','could','also',
                                            'when','then','some','more','most','kind'}]
             _lb=_lb_kws[0].upper() if _lb_kws else 'TYPE'
-            _arrow(_d,int(W*0.13),int(DZ_MID-75),int(W*0.47),_fy,_lb)
+            _arrow(_d,int(W*0.13),int(DZ_MID-75),int(W*0.47),_my,_lb)
 
         elif _ft=='idea':
-            _fy=_my+40
-            _figure(_d,_mx,_fy,118,'happy',accessory='graduation')
-            _lightbulb(_d,_mx,_fy-max(int(118*0.24),14)-86,64)
+            _figure(_d,_mx,_my+40,118,'happy',accessory='graduation',skin_col=_sk)
+            _lightbulb(_d,_mx,_my+40-max(int(118*0.24),14)-86,64)
 
-        else:  # scene
+        elif _ft=='numbered_list':
+            _numbered_list(_d,_txt)
+
+        else:
             _two=any(x in _txt.lower() for x in
                      ['together','friend','group','team','meet','social','both',
                       'they','people','us','each other','pair','couple','someone',
@@ -862,16 +911,15 @@ else:
                 _prop='money'
             elif any(x in _wl for x in ['heart','love','care','relationship','feel','emotion','empathy','connect']):
                 _prop='heart'
-            # Accessory
             _acc=None
             if any(x in _wl for x in ['ancient','history','king','queen','royal','empire','medieval','pharaoh']):
                 _acc='tophat'
             if _two:
-                _figure(_d,_mx-140,_my,106,_ex)
-                _figure(_d,_mx+140,_my,106,'neutral')
+                _figure(_d,_mx-140,_my,106,_ex,skin_col=_sk)
+                _figure(_d,_mx+140,_my,106,'neutral',skin_col=SKIN_TONES[(_i+2)%len(SKIN_TONES)])
             else:
                 _fy=_my
-                _figure(_d,_mx,_fy,128,_ex,accessory=_acc)
+                _figure(_d,_mx,_fy,128,_ex,accessory=_acc,skin_col=_sk)
                 if _prop=='book'  and _mx-260 > 30:
                     _prop_book(_d,_mx-210,_fy,44)
                 elif _prop=='screen' and _mx+260 < W-30:
@@ -883,11 +931,69 @@ else:
 
         _watermark(_d)
         _img.save(_out)
-        print(f'  [{_i+1}/{_n}] {_ft:<13} {_ex:<8} {_txt[:46]}')
+        print(f'  [{_i+1}/{_n}] {_ft:<14} {_ex:<8} {_txt[:46]}')
 
     print(f'\\nAll {_n} images drawn.')
 
-# Preview first 3 in notebook
+# ── Title card image ───────────────────────────────────────────────────────────
+_tc_path = f'{WORK_DIR}/title_card.png'
+if not os.path.exists(_tc_path):
+    _tc = Image.new('RGB',(W,H),(24,44,100))
+    _tcd = ImageDraw.Draw(_tc)
+    for _gx in range(0,W,70): _tcd.line([(_gx,0),(_gx,H)],fill=(38,60,125),width=1)
+    for _gy in range(0,H,70): _tcd.line([(0,_gy),(W,_gy)],fill=(38,60,125),width=1)
+    _tcd.line([(0,H//2-3),(W,H//2-3)],fill=C['orange'],width=4)
+    _tcd.line([(0,H//2+3),(W,H//2+3)],fill=C['orange'],width=2)
+    _bf=_font(30); _btxt='UNLEARNED'
+    _bbb=_tcd.textbbox((0,0),_btxt,font=_bf)
+    _bw=_bbb[2]-_bbb[0]+44; _bh=_bbb[3]-_bbb[1]+20
+    _tcd.rectangle([W//2-_bw//2,72,W//2+_bw//2,72+_bh],fill=C['orange'])
+    _tcd.text((W//2-(_bbb[2]-_bbb[0])//2,72+10),_btxt,fill=C['white'],font=_bf)
+    _tf=_font(72); _tls=_wrap(EPISODE_TITLE.upper(),_tcd,_tf,W-160)
+    _tty=H//2-len(_tls)*90//2+30
+    for _tl in _tls[:3]:
+        _tb=_tcd.textbbox((0,0),_tl,font=_tf)
+        _tcd.text((W//2-(_tb[2]-_tb[0])//2,_tty),_tl,fill=C['white'],font=_tf)
+        _tty+=92
+    _tcd.line([(90,H-90),(W-90,H-90)],fill=C['orange'],width=2)
+    _tc.save(_tc_path)
+    print(f'Title card: {_tc_path}')
+
+# ── Thumbnail (title card as JPEG) ────────────────────────────────────────────
+_thumb_path = f'{WORK_DIR}/thumbnail.jpg'
+if not os.path.exists(_thumb_path) and os.path.exists(_tc_path):
+    Image.open(_tc_path).save(_thumb_path,'JPEG',quality=95)
+    print(f'Thumbnail : {_thumb_path}')
+
+# ── End card image ─────────────────────────────────────────────────────────────
+_ec_path = f'{WORK_DIR}/end_card.png'
+if not os.path.exists(_ec_path):
+    _ec = Image.new('RGB',(W,H),(15,15,25))
+    _ecd = ImageDraw.Draw(_ec)
+    for _rr in range(30,240,40):
+        _v = 35+_rr//6
+        _ecd.ellipse([W//2-_rr,H//2-90-_rr,W//2+_rr,H//2-90+_rr],outline=(_v,_v,_v+18),width=1)
+    # Bell body
+    _bx2,_by2=W//2,H//2-80
+    _ecd.ellipse([_bx2-44,_by2-22,_bx2+44,_by2+50],fill=C['gold'])
+    _ecd.rectangle([_bx2-52,_by2+30,_bx2+52,_by2+54],fill=C['gold'])
+    _ecd.ellipse([_bx2-11,_by2-44,_bx2+11,_by2-26],fill=C['gold'])
+    _ecd.ellipse([_bx2-15,_by2+52,_bx2+15,_by2+72],fill=C['gold'])
+    # SUBSCRIBE
+    _sf2=_font(80); _stxt='SUBSCRIBE'
+    _sbb=_ecd.textbbox((0,0),_stxt,font=_sf2)
+    _ecd.text((W//2-(_sbb[2]-_sbb[0])//2,H//2+44),_stxt,fill=C['orange'],font=_sf2)
+    # Channel name
+    _cf3=_font(38); _ctxt='UNLEARNED'
+    _cbb=_ecd.textbbox((0,0),_ctxt,font=_cf3)
+    _ecd.text((W//2-(_cbb[2]-_cbb[0])//2,H//2+148),_ctxt,fill=C['white'],font=_cf3)
+    _sf3=_font(24); _sub='Psychology  .  Ancient History  .  Behavioral Science'
+    _sb3=_ecd.textbbox((0,0),_sub,font=_sf3)
+    _ecd.text((W//2-(_sb3[2]-_sb3[0])//2,H//2+200),_sub,fill=(170,170,170),font=_sf3)
+    _ec.save(_ec_path)
+    print(f'End card  : {_ec_path}')
+
+# Preview first 3 scenes in notebook
 try:
     from IPython.display import display, Image as _IPImg
     print('\\nPreview (first 3 scenes):')
@@ -898,10 +1004,10 @@ except Exception:
 print('Run Cell 5.')
 """)
 
-# ── CELL 6: Ken Burns with per-clip white transitions ──────────────────────────
+# ── CELL 6: Ken Burns + title/end card clips ───────────────────────────────────
 
 CELL_MOTION = code("""\
-# ── CELL 5: Ken Burns + per-clip white fade transitions ──────────────────────
+# ── CELL 5: Ken Burns clips + title card clip + end card clip ─────────────────
 import json, os, subprocess
 
 if 'WORK_DIR'  not in dir(): WORK_DIR  = '/content/unlearned'
@@ -910,8 +1016,8 @@ os.makedirs(CLIP_DIR, exist_ok=True)
 if 'SCENE_DATA' not in dir():
     with open(f'{WORK_DIR}/scene_data.json') as _f: SCENE_DATA = json.load(_f)
 
-_n=len(SCENE_DATA); _clips=[]; _TD=0.15  # transition fade duration (s)
-print(f'Building {_n} Ken Burns clips (7 directions, {int(_TD*1000)}ms white fade transitions)...')
+_n=len(SCENE_DATA); _clips=[]; _TD=0.15
+print(f'Building {_n} Ken Burns clips (7 directions, {int(_TD*1000)}ms white transitions)...')
 
 for _i, _sc in enumerate(SCENE_DATA):
     _img=_sc['image']; _audio=_sc['audio']; _dur=_sc['duration']
@@ -919,7 +1025,6 @@ for _i, _sc in enumerate(SCENE_DATA):
     if os.path.exists(_clip): print(f'  [{_i+1}/{_n}] cached'); continue
 
     _nf=max(int(_dur*30),2); _p=_i%7
-    # 7 Ken Burns directions
     if   _p==0: _zp=f"z='min(zoom+0.0004,1.16)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={_nf}"
     elif _p==1: _zp=f"z='min(zoom+0.0004,1.16)':x='0':y='0':d={_nf}"
     elif _p==2: _zp=f"z='min(zoom+0.0004,1.16)':x='iw-iw/zoom':y='ih-ih/zoom':d={_nf}"
@@ -928,7 +1033,6 @@ for _i, _sc in enumerate(SCENE_DATA):
     elif _p==5: _zp=f"z='min(zoom+0.0004,1.16)':x='0':y='ih-ih/zoom':d={_nf}"
     else:       _zp=f"z='if(lte(zoom,1.0),1.16,zoom-0.0004)':x='iw-iw/zoom':y='0':d={_nf}"
 
-    # Per-clip fade: fade-in (except scene 0) + fade-out to white
     _fo_st=max(0.0, _dur-_TD-0.05)
     _fi=f',fade=t=in:st=0:d={_TD}:color=white' if _i>0 else ''
     _fo=f',fade=t=out:st={_fo_st:.2f}:d={_TD}:color=white'
@@ -948,35 +1052,76 @@ for _i, _sc in enumerate(SCENE_DATA):
 
 import json as _jj
 with open(f'{WORK_DIR}/clip_paths.json','w') as _f: _jj.dump(_clips,_f)
-print(f'\\n{_n} clips done. Run Cell 6.')
+
+# ── Title card clip (3 s) ─────────────────────────────────────────────────────
+TITLE_DUR = 3.0
+_tc_img = f'{WORK_DIR}/title_card.png'
+_tc_clip = f'{CLIP_DIR}/clip_title.mp4'
+if os.path.exists(_tc_img) and not os.path.exists(_tc_clip):
+    _r=subprocess.run([
+        'ffmpeg','-y','-loop','1','-i',_tc_img,
+        '-f','lavfi','-i','anullsrc=r=44100:cl=stereo',
+        '-t',str(TITLE_DUR),
+        '-vf',f'scale=1280:720,fade=t=in:st=0:d=0.5:color=black,fade=t=out:st={TITLE_DUR-0.5:.1f}:d=0.5:color=white',
+        '-c:v','libx264','-crf','17','-preset','fast',
+        '-c:a','aac','-b:a','192k','-pix_fmt','yuv420p',_tc_clip,
+    ],capture_output=True,text=True)
+    if _r.returncode==0: print(f'Title card clip: {TITLE_DUR}s OK')
+    else: print(f'Title clip error: {_r.stderr[-200:]}')
+
+_td_f = f'{WORK_DIR}/title_dur.txt'
+with open(_td_f,'w') as _f:
+    _f.write(str(TITLE_DUR) if os.path.exists(_tc_clip) else '0.0')
+
+# ── End card clip (4 s) ───────────────────────────────────────────────────────
+END_DUR = 4.0
+_ec_img = f'{WORK_DIR}/end_card.png'
+_ec_clip = f'{CLIP_DIR}/clip_end.mp4'
+if os.path.exists(_ec_img) and not os.path.exists(_ec_clip):
+    _r=subprocess.run([
+        'ffmpeg','-y','-loop','1','-i',_ec_img,
+        '-f','lavfi','-i','anullsrc=r=44100:cl=stereo',
+        '-t',str(END_DUR),
+        '-vf',f'scale=1280:720,fade=t=in:st=0:d=0.5:color=white,fade=t=out:st={END_DUR-0.7:.1f}:d=0.7:color=black',
+        '-c:v','libx264','-crf','17','-preset','fast',
+        '-c:a','aac','-b:a','192k','-pix_fmt','yuv420p',_ec_clip,
+    ],capture_output=True,text=True)
+    if _r.returncode==0: print(f'End card clip: {END_DUR}s OK')
+    else: print(f'End clip error: {_r.stderr[-200:]}')
+
+_ed_f = f'{WORK_DIR}/end_dur.txt'
+with open(_ed_f,'w') as _f:
+    _f.write(str(END_DUR) if os.path.exists(_ec_clip) else '0.0')
+
+print(f'\\n{_n} scene clips + title/end cards done. Run Cell 6.')
 """)
 
-# ── CELL 7: Karplus-Strong Music v5 ───────────────────────────────────────────
+# ── CELL 7: Karplus-Strong Music v6 (+ echo reverb) ───────────────────────────
 
 CELL_MUSIC = code("""\
-# ── CELL 6: Music v5 — chunk-KS (100x faster), 16-bar + melody ───────────────
-# Karplus-Strong via period-by-period numpy (NOT sample-by-sample) — ~100x faster.
-# 16-bar loop: bars 1-8 C-G-Am-F (arpeggio ascending) +
-#              bars 9-16 Am-F-C-G (arpeggio descending) + pentatonic melody line.
+# ── CELL 6: Music v6 — chunk-KS + echo reverb, 16-bar + melody ───────────────
 import numpy as np, wave, os, subprocess, json
 
 if 'WORK_DIR'  not in dir(): WORK_DIR  = '/content/unlearned'
 if 'SCENE_DATA' not in dir():
     with open(f'{WORK_DIR}/scene_data.json') as _f: SCENE_DATA = json.load(_f)
 
-_total_dur = sum(s['duration'] for s in SCENE_DATA)
+_td_f = f'{WORK_DIR}/title_dur.txt'
+_ed_f = f'{WORK_DIR}/end_dur.txt'
+_title_d = float(open(_td_f).read().strip()) if os.path.exists(_td_f) else 0.0
+_end_d   = float(open(_ed_f).read().strip()) if os.path.exists(_ed_f) else 0.0
+_total_dur = sum(s['duration'] for s in SCENE_DATA) + _title_d + _end_d
 _music_dur = _total_dur + 12.0
 SR         = 44100
 BPM        = 112.0
-BEAT       = 60.0/BPM        # 0.5357 s
-HALF_BEAT  = BEAT/2           # 0.2679 s
+BEAT       = 60.0/BPM
+HALF_BEAT  = BEAT/2
 LOOP_BARS  = 16
 LOOP_SAMP  = int(SR * LOOP_BARS * 4 * BEAT)
 
-np.random.seed(42)   # reproducible
+np.random.seed(42)
 
 def _ks(freq, dur_sec, damping=0.9965):
-    '''Chunk-based KS: iterate period-by-period with numpy roll (100x faster).'''
     n      = int(SR * dur_sec)
     period = max(int(round(SR / freq)), 1)
     buf    = np.random.uniform(-0.5, 0.5, period).astype(np.float32)
@@ -987,31 +1132,27 @@ def _ks(freq, dur_sec, damping=0.9965):
         buf = damping * 0.5 * (buf + np.roll(buf, -1))
     return np.concatenate(chunks)[:n]
 
-# Chord definitions
-CHORDS_A = [              # C-G-Am-F × 2  (bars 1-8)
-    [261.63,329.63,392.00],   # C major
-    [196.00,246.94,293.66],   # G major
-    [220.00,261.63,329.63],   # A minor
-    [174.61,220.00,261.63],   # F major
+CHORDS_A = [
+    [261.63,329.63,392.00],
+    [196.00,246.94,293.66],
+    [220.00,261.63,329.63],
+    [174.61,220.00,261.63],
 ]*2
-CHORDS_B = [              # Am-F-C-G × 2  (bars 9-16)
-    [220.00,261.63,329.63],   # A minor
-    [174.61,220.00,261.63],   # F major
-    [261.63,329.63,392.00],   # C major
-    [196.00,246.94,293.66],   # G major
+CHORDS_B = [
+    [220.00,261.63,329.63],
+    [174.61,220.00,261.63],
+    [261.63,329.63,392.00],
+    [196.00,246.94,293.66],
 ]*2
 
-ARP_A=[(0,0.34),(1,0.27),(2,0.24),(0,0.19)]  # root 3rd 5th root (ascending)
-ARP_B=[(2,0.30),(1,0.26),(0,0.22),(2,0.18)]  # 5th 3rd root 5th (descending)
+ARP_A=[(0,0.34),(1,0.27),(2,0.24),(0,0.19)]
+ARP_B=[(2,0.30),(1,0.26),(0,0.22),(2,0.18)]
 
-# Pentatonic melody (C5-A5 range) — A=ascending, B=descending
 PENTA_A=[523.25,587.33,659.25,783.99,880.00,783.99,659.25,587.33]
 PENTA_B=[880.00,783.99,659.25,587.33,523.25,587.33,659.25,783.99]
 MELODY_VOL=0.09
 
-print(f'Generating 16-bar KS loop × {_music_dur//(LOOP_BARS*4*BEAT):.1f}...')
-print('(chunk-based — should finish in a few seconds)')
-
+print(f'Generating 16-bar KS loop + echo reverb...')
 mix = np.zeros(LOOP_SAMP, dtype=np.float32)
 
 for bar_idx in range(LOOP_BARS):
@@ -1021,7 +1162,6 @@ for bar_idx in range(LOOP_BARS):
     melody  = PENTA_B if is_b else PENTA_A
     root,third,fifth = chord
 
-    # Arpeggio
     for beat_idx,(ni,vol) in enumerate(arp):
         freq = [root,third,fifth][ni]
         samp_st = int((bar_idx*4+beat_idx)*BEAT*SR)
@@ -1029,14 +1169,12 @@ for bar_idx in range(LOOP_BARS):
         end     = min(samp_st+len(note), LOOP_SAMP)
         mix[samp_st:end] += note[:end-samp_st]
 
-    # Bass (root -1 octave, longer decay)
     bvol = 0.20 if is_b else 0.22
     bass = _ks(root/2, BEAT*1.6, damping=0.999)*bvol
     bst  = int(bar_idx*4*BEAT*SR)
     end  = min(bst+len(bass), LOOP_SAMP)
     mix[bst:end] += bass[:end-bst]
 
-    # Melody (pentatonic, 8 notes per bar, half-beat spacing)
     for ni,mel_freq in enumerate(melody):
         samp_st=int((bar_idx*8+ni)*HALF_BEAT*SR)
         note=_ks(mel_freq, HALF_BEAT*0.76, damping=0.9945)*MELODY_VOL
@@ -1045,7 +1183,6 @@ for bar_idx in range(LOOP_BARS):
 
 print('KS loop done.')
 
-# Normalise + master fade
 mix /= (np.max(np.abs(mix))+1e-9); mix *= 0.60
 _fi=int(SR*1.5); _fo=int(SR*2.0)
 mix[:_fi]  *= np.linspace(0,1,_fi,  dtype=np.float32)
@@ -1062,19 +1199,19 @@ _fade_st=max(0,_music_dur-7.0)
 subprocess.run([
     'ffmpeg','-y','-stream_loop','-1','-i',_loop_wav,
     '-t',str(_music_dur),
-    '-af',f'afade=t=in:st=0:d=2,afade=t=out:st={_fade_st:.1f}:d=7',
+    '-af',f'afade=t=in:st=0:d=2,aecho=0.85:0.90:40:0.35,afade=t=out:st={_fade_st:.1f}:d=7',
     '-q:a','4',MUSIC_MP3,
 ], capture_output=True, check=True)
 os.remove(_loop_wav)
 
-print(f'Music: 16-bar KS harp+melody  {_music_dur:.0f}s  ({MUSIC_MP3})')
+print(f'Music: 16-bar KS + echo reverb  {_music_dur:.0f}s  ({MUSIC_MP3})')
 print('Run Cell 7.')
 """)
 
-# ── CELL 8: Assemble ──────────────────────────────────────────────────────────
+# ── CELL 8: Assemble (with title/end card clips) ───────────────────────────────
 
 CELL_ASSEMBLE = code("""\
-# ── CELL 7: Assemble clips ────────────────────────────────────────────────────
+# ── CELL 7: Assemble — title card + scene clips + end card ────────────────────
 import json, os, subprocess
 
 if 'WORK_DIR'  not in dir(): WORK_DIR  = '/content/unlearned'
@@ -1087,14 +1224,23 @@ if os.path.exists(_cpf):
     with open(_cpf) as _f: _clips=json.load(_f)
 else:
     _clips=sorted([f'{CLIP_DIR}/{fn}' for fn in os.listdir(CLIP_DIR)
-                   if fn.startswith('clip_') and fn.endswith('.mp4')])
+                   if fn.startswith('clip_') and fn.endswith('.mp4')
+                   and 'title' not in fn and 'end' not in fn])
+
+_tc_clip = f'{CLIP_DIR}/clip_title.mp4'
+_ec_clip = f'{CLIP_DIR}/clip_end.mp4'
+_all_clips = []
+if os.path.exists(_tc_clip): _all_clips.append(_tc_clip)
+_all_clips.extend(_clips)
+if os.path.exists(_ec_clip): _all_clips.append(_ec_clip)
 
 _list=f'{WORK_DIR}/clip_list.txt'
 with open(_list,'w') as _f:
-    for _c in _clips: _f.write(f"file '{_c}'\\n")
+    for _c in _all_clips: _f.write(f"file '{_c}'\\n")
 
 RAW_VIDEO=f'{WORK_DIR}/video_raw.mp4'
-print(f'Concatenating {len(_clips)} clips...')
+_extras = (1 if os.path.exists(_tc_clip) else 0) + (1 if os.path.exists(_ec_clip) else 0)
+print(f'Concatenating {len(_all_clips)} clips ({len(_clips)} scenes + {_extras} cards)...')
 _r=subprocess.run(['ffmpeg','-y','-f','concat','-safe','0',
                    '-i',_list,'-c','copy',RAW_VIDEO],
                   capture_output=True, text=True)
@@ -1103,15 +1249,14 @@ if _r.returncode!=0:
 
 _mb=os.path.getsize(RAW_VIDEO)/1_048_576
 _total=sum(s['duration'] for s in SCENE_DATA)
-print(f'Raw video: {_total:.0f}s  {_mb:.1f} MB')
+print(f'Raw video: {_total:.0f}s scenes  {_mb:.1f} MB')
 print('Run Cell 8.')
 """)
 
-# ── CELL 9: ASS Captions (4-word phrase grouping, font 28) ────────────────────
+# ── CELL 9: ASS Captions (with title card timing offset) ──────────────────────
 
 CELL_CAPTIONS = code("""\
-# ── CELL 8: Yellow ASS captions — 4-word phrase groups, font 28 ──────────────
-# No PIL caption band. These ASS captions ARE the only on-screen text.
+# ── CELL 8: Yellow ASS captions — 4-word phrases + title card offset ──────────
 import json, os, re, subprocess
 
 if 'WORK_DIR'  not in dir(): WORK_DIR  = '/content/unlearned'
@@ -1137,7 +1282,6 @@ def _parse_vtt(vtt_path, offset=0.0):
     return entries
 
 def _group_words(entries, n=4):
-    '''Group word-level VTT entries into n-word phrase chunks.'''
     if not entries: return []
     groups=[]
     for i in range(0, len(entries), n):
@@ -1154,11 +1298,14 @@ def _srt_ts(sec):
     h=int(sec//3600);m=int((sec%3600)//60);s=int(sec%60);ms=int((sec%1)*1000)
     return f'{h:02d}:{m:02d}:{s:02d},{ms:03d}'
 
-_all=[]; _offset=0.0
+# Read title card offset so captions start after the title card
+_td_f = f'{WORK_DIR}/title_dur.txt'
+_title_off = float(open(_td_f).read().strip()) if os.path.exists(_td_f) else 0.0
+
+_all=[]; _offset=_title_off
 for _sc in SCENE_DATA:
     _entries=_parse_vtt(_sc.get('vtt',''), _offset)
     if _entries:
-        # Detect word-level VTT (avg ≤2 words per entry) → group into 4-word phrases
         _avg=sum(len(e[2].split()) for e in _entries)/len(_entries)
         if _avg<=2.5:
             _entries=_group_words(_entries, n=4)
@@ -1167,7 +1314,6 @@ for _sc in SCENE_DATA:
         _all.append((_offset, _offset+_sc['duration'], _sc['text']))
     _offset+=_sc['duration']
 
-# ASS style: yellow, font 28, 2.5px black outline, bottom-centre, 32px margin
 ASS_HEADER='''[Script Info]
 ScriptType: v4.00+
 WrapStyle: 0
@@ -1196,7 +1342,7 @@ with open(_srt_path,'w',encoding='utf-8') as f:
     for idx,(s,e,txt) in enumerate(_all,1):
         f.write(f'{idx}\\n{_srt_ts(s)} --> {_srt_ts(e)}\\n{txt.strip()}\\n\\n')
 
-print(f'Captions: {len(_all)} entries (4-word phrases, font 28, yellow)')
+print(f'Captions: {len(_all)} entries (offset={_title_off:.1f}s, font-28, yellow)')
 
 _ass_esc=_ass_path.replace('\\\\','/').replace(':','\\\\:')
 CAPTIONED_VIDEO=f'{WORK_DIR}/video_captioned.mp4'
@@ -1225,7 +1371,7 @@ if _r.returncode!=0:
     else:
         print('SRT fallback OK.')
 else:
-    print('Captions burned: yellow/font-28/2.5px-outline.')
+    print('Captions burned: yellow / font-28 / 2.5px outline.')
 
 print('Run Cell 9.')
 """)
@@ -1233,7 +1379,7 @@ print('Run Cell 9.')
 # ── CELL 10: Mix ──────────────────────────────────────────────────────────────
 
 CELL_MIX = code("""\
-# ── CELL 9: Mix music + loudnorm voiceover + white fade in/out ────────────────
+# ── CELL 9: Mix music + loudnorm + white master fade ─────────────────────────
 import json, os, re, subprocess
 
 if 'WORK_DIR'    not in dir(): WORK_DIR    = '/content/unlearned'
@@ -1247,13 +1393,18 @@ if 'EPISODE_TITLE' not in dir():
 if 'SCENE_DATA' not in dir():
     with open(f'{WORK_DIR}/scene_data.json') as _f: SCENE_DATA=json.load(_f)
 
-_total=sum(s['duration'] for s in SCENE_DATA)
-_fo_st=max(0, _total-2.5)
-_safe=re.sub(r'[^\\w\\s-]+','',EPISODE_TITLE).strip().replace(' ','_')
+_td_f = f'{WORK_DIR}/title_dur.txt'
+_ed_f = f'{WORK_DIR}/end_dur.txt'
+_title_d = float(open(_td_f).read().strip()) if os.path.exists(_td_f) else 0.0
+_end_d   = float(open(_ed_f).read().strip()) if os.path.exists(_ed_f) else 0.0
+_total = sum(s['duration'] for s in SCENE_DATA) + _title_d + _end_d
+_fo_st = max(0, _total-2.5)
+_safe  = re.sub(r'[^\\w\\s-]+','',EPISODE_TITLE).strip().replace(' ','_')
 FINAL_VIDEO=f'{WORK_DIR}/UNLEARNED_{_safe}.mp4'
 
-print(f'Mixing: voiceover loudnorm -16 LUFS + music {int(MUSIC_VOL*100)}%')
-print(f'Fade: in 0.8s white  |  out 2.5s white')
+print(f'Total duration: {_total:.1f}s ({_total/60:.1f} min)')
+print(f'Mixing: loudnorm -16 LUFS + music {int(MUSIC_VOL*100)}%')
+print(f'Master fade: in 0.8s white | out 2.5s white')
 
 _r=subprocess.run([
     'ffmpeg','-y',
@@ -1291,10 +1442,10 @@ print(f'Size        : {_mb:.1f} MB  |  Duration: {_total:.0f}s ({_total/60:.1f} 
 print('Run Cell 10 to download.')
 """)
 
-# ── CELL 11: Download ─────────────────────────────────────────────────────────
+# ── CELL 11: Download (all assets) ────────────────────────────────────────────
 
 CELL_DOWNLOAD = code("""\
-# ── CELL 10: Download ─────────────────────────────────────────────────────────
+# ── CELL 10: Download — video + captions + thumbnail + YT description/chapters
 import os, re, json
 from google.colab import files as _gcf
 
@@ -1304,37 +1455,88 @@ if 'FINAL_VIDEO' not in dir():
     EPISODE_TITLE=open(_tp).read().strip() if os.path.exists(_tp) else 'Episode'
     _safe=re.sub(r'[^\\w\\s-]+','',EPISODE_TITLE).strip().replace(' ','_')
     FINAL_VIDEO=f'{WORK_DIR}/UNLEARNED_{_safe}.mp4'
+if 'EPISODE_TITLE' not in dir():
+    _tp=f'{WORK_DIR}/episode_title.txt'
+    EPISODE_TITLE=open(_tp).read().strip() if os.path.exists(_tp) else 'Episode'
+if 'SCENE_DATA' not in dir():
+    _jp=f'{WORK_DIR}/scene_data.json'
+    if os.path.exists(_jp):
+        with open(_jp) as _f: SCENE_DATA=json.load(_f)
+    else:
+        SCENE_DATA=[]
 
 if not os.path.exists(FINAL_VIDEO):
     raise RuntimeError(f'Video not found: {FINAL_VIDEO}  — run Cell 9 first.')
 
+# ── Video ─────────────────────────────────────────────────────────────────────
 _mb=os.path.getsize(FINAL_VIDEO)/1_048_576
 print(f'Downloading: {os.path.basename(FINAL_VIDEO)}  ({_mb:.1f} MB)')
 _gcf.download(FINAL_VIDEO)
 
+# ── Captions ──────────────────────────────────────────────────────────────────
 for _cf in [f'{WORK_DIR}/captions.srt', f'{WORK_DIR}/captions.ass']:
     if os.path.exists(_cf):
         print(f'Downloading: {os.path.basename(_cf)}')
         _gcf.download(_cf)
 
-if 'SCENE_DATA' not in dir():
-    _jp=f'{WORK_DIR}/scene_data.json'
-    if os.path.exists(_jp):
-        with open(_jp) as _f: SCENE_DATA=json.load(_f)
+# ── Thumbnail ─────────────────────────────────────────────────────────────────
+_thumb = f'{WORK_DIR}/thumbnail.jpg'
+if os.path.exists(_thumb):
+    print('Downloading: thumbnail.jpg')
+    _gcf.download(_thumb)
 
-if 'SCENE_DATA' in dir():
-    _total=sum(s['duration'] for s in SCENE_DATA)
-    _ep=EPISODE_TITLE if 'EPISODE_TITLE' in dir() else '—'
-    print(f'\\nEpisode  : {_ep}')
-    print(f'Duration : {_total:.0f}s  ({_total/60:.1f} min)')
+# ── YouTube chapters ──────────────────────────────────────────────────────────
+_td_f = f'{WORK_DIR}/title_dur.txt'
+_title_off = float(open(_td_f).read().strip()) if os.path.exists(_td_f) else 0.0
+_chap_path = f'{WORK_DIR}/yt_chapters.txt'
+with open(_chap_path,'w',encoding='utf-8') as _cf2:
+    _cf2.write('0:00 Introduction\\n')
+    _off = _title_off
+    for _si, _s in enumerate(SCENE_DATA):
+        _ts = int(_off)
+        _mm, _ss = _ts//60, _ts%60
+        _snip = re.sub(r'[^\\w\\s]','',_s['text'])[:38].strip()
+        _cf2.write(f'{_mm}:{_ss:02d} {_snip}\\n')
+        _off += _s['duration']
+print('Downloading: yt_chapters.txt')
+_gcf.download(_chap_path)
+
+# ── YouTube description ───────────────────────────────────────────────────────
+_desc_path = f'{WORK_DIR}/yt_description.txt'
+_intro = ' '.join(_s['text'] for _s in SCENE_DATA[:2])[:250] if SCENE_DATA else ''
+_ch_lines = open(_chap_path,'r',encoding='utf-8').read() if os.path.exists(_chap_path) else ''
+with open(_desc_path,'w',encoding='utf-8') as _df:
+    _df.write(EPISODE_TITLE + '\\n\\n')
+    _df.write(_intro + '\\n\\n')
+    _df.write('=' * 48 + '\\n')
+    _df.write('UNLEARNED — Psychology, Ancient History, Behavioral Science\\n\\n')
+    _df.write('CHAPTERS\\n')
+    _df.write(_ch_lines + '\\n')
+    _df.write('=' * 48 + '\\n\\n')
+    _df.write('#psychology #ancienthistory #behavioralscience #UNLEARNED\\n')
+    _df.write('#mindset #history #brainscience #ancientworld #humanpsychology\\n\\n')
+    _df.write('SUBSCRIBE for more: @unlearnedchannel\\n')
+print('Downloading: yt_description.txt')
+_gcf.download(_desc_path)
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+if SCENE_DATA:
+    _td_e = f'{WORK_DIR}/end_dur.txt'
+    _end_d = float(open(_td_e).read().strip()) if os.path.exists(_td_e) else 0.0
+    _total = sum(s['duration'] for s in SCENE_DATA) + _title_off + _end_d
+    print(f'\\nEpisode  : {EPISODE_TITLE}')
+    print(f'Duration : {_total:.0f}s ({_total/60:.1f} min)')
     print(f'Scenes   : {len(SCENE_DATA)}')
-    print()
-    print('YouTube upload tips:')
-    print('  • Upload UNLEARNED_*.mp4 as the main video')
-    print('  • Upload captions.srt in YouTube Studio → Subtitles (word-synced)')
-    print('  • captions.ass burned-in version is already inside the video')
 
-print('\\nDone!')
+print('''
+Upload checklist:
+  1. UNLEARNED_*.mp4      — main video
+  2. thumbnail.jpg        — YouTube thumbnail (upload in Studio)
+  3. captions.srt         — YouTube Studio > Subtitles (word-synced)
+  4. yt_description.txt   — paste into video description
+  5. yt_chapters.txt      — chapters are already in the description
+  Done!
+''')
 """)
 
 # ── Assemble notebook ──────────────────────────────────────────────────────────
