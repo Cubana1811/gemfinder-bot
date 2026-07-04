@@ -1449,7 +1449,9 @@ async def command_listener(bot: Bot):
 
 async def trading_loop(bot: Bot):
     log.info("Trading loop started. PAPER_TRADE=%s" % PAPER_TRADE)
-    scan_count = 0
+    scan_count         = 0
+    btc_was_ranging    = False
+    last_ranging_alert = 0.0
 
     while True:
         scan_count += 1
@@ -1469,10 +1471,51 @@ async def trading_loop(bot: Bot):
             await asyncio.sleep(SCAN_INTERVAL)
             continue
 
-        if btc_is_ranging():
+        btc_ranging = btc_is_ranging()
+        if btc_ranging:
             log.info("Scan #%d — BTC ranging (ADX<20), skipping crypto." % scan_count)
+            if not btc_was_ranging:
+                try:
+                    fgi = fetch_fear_greed()
+                    btc_chg = fetch_btc_change()
+                    await bot.send_message(chat_id=CHAT_ID, text=(
+                        "[AUTO-TRADER] BTC ranging — trading paused\n\n"
+                        "BTC 4h ADX dropped below 20.\n"
+                        "No new entries until BTC trends again.\n\n"
+                        "FGI: %d  |  BTC: %+.2f%%\n\n"
+                        "I will notify you when trading resumes."
+                    ) % (fgi, btc_chg))
+                except Exception as e:
+                    log.error("Ranging start alert error: %s" % e)
+                last_ranging_alert = time.time()
+                btc_was_ranging = True
+            elif time.time() - last_ranging_alert >= 3600:
+                try:
+                    fgi = fetch_fear_greed()
+                    btc_chg = fetch_btc_change()
+                    await bot.send_message(chat_id=CHAT_ID, text=(
+                        "[AUTO-TRADER] Still ranging — Scan #%d\n\n"
+                        "BTC 4h ADX still below 20. No trades until trend returns.\n"
+                        "FGI: %d  |  BTC: %+.2f%%"
+                    ) % (scan_count, fgi, btc_chg))
+                except Exception as e:
+                    log.error("Ranging hourly alert error: %s" % e)
+                last_ranging_alert = time.time()
             await asyncio.sleep(SCAN_INTERVAL)
             continue
+        else:
+            if btc_was_ranging:
+                try:
+                    fgi = fetch_fear_greed()
+                    btc_chg = fetch_btc_change()
+                    await bot.send_message(chat_id=CHAT_ID, text=(
+                        "[AUTO-TRADER] BTC trending again — trading resumed!\n\n"
+                        "FGI: %d  |  BTC: %+.2f%%\n\n"
+                        "Watching for high-quality setups..."
+                    ) % (fgi, btc_chg))
+                except Exception as e:
+                    log.error("Ranging end alert error: %s" % e)
+            btc_was_ranging = False
 
         log.info("Scan #%d starting..." % scan_count)
 

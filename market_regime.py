@@ -23,7 +23,8 @@ TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHAT_ID         = os.environ.get("CHAT_ID", "YOUR_CHAT_ID_HERE")
 BYBIT_BASE      = "https://api.bybit.com"
 FEAR_GREED_URL  = "https://api.alternative.me/fng/?limit=1"
-REGIME_FILE     = "regime.json"
+DATA_DIR        = os.environ.get("DATA_DIR", "/app/data")
+REGIME_FILE     = os.path.join(DATA_DIR, "regime.json")
 CHECK_INTERVAL  = 60   # check every 60 seconds if it's time to run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -92,6 +93,7 @@ def parse_closes(klines):
     return [float(k[4]) for k in klines] if klines else []
 
 def save_regime(regime_data):
+    os.makedirs(DATA_DIR, exist_ok=True)
     with open(REGIME_FILE, "w") as f:
         json.dump(regime_data, f, indent=2)
 
@@ -215,12 +217,12 @@ def analyse_regime():
     if fgi >= 60:
         bull_score += 1
         details["fgi_signal"] = "GREED (%d) — momentum" % fgi
-    elif fgi <= 30:
-        bear_score += 1
-        details["fgi_signal"] = "FEAR (%d) — caution" % fgi
     elif fgi <= 20:
         bull_score += 1   # extreme fear = contrarian buy
         details["fgi_signal"] = "EXTREME FEAR (%d) — contrarian buy zone" % fgi
+    elif fgi <= 30:
+        bear_score += 1
+        details["fgi_signal"] = "FEAR (%d) — caution" % fgi
     else:
         details["fgi_signal"] = "NEUTRAL (%d)" % fgi
 

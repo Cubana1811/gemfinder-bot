@@ -693,8 +693,7 @@ def fetch_dvol() -> float:
     Crypto-native VIX. >90 = extreme uncertainty, TA unreliable. <35 = calm, trend continuation likely.
     Uses get_volatility_index_data (resolution=3600) — the correct endpoint for DVOL.
     """
-    import time as _time
-    end_ts   = int(_time.time() * 1000)
+    end_ts   = int(time.time() * 1000)
     start_ts = end_ts - 3600000  # 1 hour window
     data = safe_get(
         "https://www.deribit.com/api/v2/public/get_volatility_index_data"
