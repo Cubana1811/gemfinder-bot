@@ -2335,8 +2335,10 @@ async def main():
         ) % (MIN_SCORE, MIN_RR, SCAN_INTERVAL)
     )
 
-    seen_signals = {}
-    scan_count   = 0
+    seen_signals       = {}
+    scan_count         = 0
+    btc_was_ranging    = False   # tracks ranging state across scan cycles
+    last_ranging_alert = 0.0    # timestamp of last ranging status message
 
     while True:
         scan_count += 1
@@ -2370,6 +2372,43 @@ async def main():
         btc_ranging = btc_is_ranging()
         if btc_ranging:
             log.info("BTC 4h ADX < 20 (ranging market) — skipping crypto scan this cycle.")
+            if not btc_was_ranging:
+                # Ranging just started — send one-time alert
+                try:
+                    await bot.send_message(chat_id=CHAT_ID, text=(
+                        "[SCANNER] BTC ranging — scanning paused\n\n"
+                        "BTC 4h ADX dropped below 20.\n"
+                        "Crypto scanning paused until BTC trends again.\n\n"
+                        "FGI: %d  |  BTC: %+.2f%%\n\n"
+                        "I will notify you when scanning resumes."
+                    ) % (market["fear_greed"], market["btc_chg"]))
+                except Exception as e:
+                    log.error("Ranging start alert error: %s" % e)
+                last_ranging_alert = time.time()
+                btc_was_ranging = True
+            elif time.time() - last_ranging_alert >= 3600:
+                # Still ranging — send hourly status so user knows bot is alive
+                try:
+                    await bot.send_message(chat_id=CHAT_ID, text=(
+                        "[SCANNER] Still ranging — Scan #%d\n\n"
+                        "BTC 4h ADX still below 20. No signals until trend returns.\n"
+                        "FGI: %d  |  BTC: %+.2f%%"
+                    ) % (scan_count, market["fear_greed"], market["btc_chg"]))
+                except Exception as e:
+                    log.error("Ranging hourly alert error: %s" % e)
+                last_ranging_alert = time.time()
+        else:
+            if btc_was_ranging:
+                # Ranging just ended — BTC is trending again
+                try:
+                    await bot.send_message(chat_id=CHAT_ID, text=(
+                        "[SCANNER] BTC trending again — scanning resumed!\n\n"
+                        "FGI: %d  |  BTC: %+.2f%%\n\n"
+                        "Watching for high-quality setups..."
+                    ) % (market["fear_greed"], market["btc_chg"]))
+                except Exception as e:
+                    log.error("Ranging end alert error: %s" % e)
+            btc_was_ranging = False
 
         try:
             candidates = [] if btc_ranging else tv_scan_multi_exchange(filter_side="both", limit=100)
