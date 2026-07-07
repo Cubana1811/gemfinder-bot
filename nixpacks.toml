@@ -2,4 +2,4 @@
 nixPkgs = ["python312", "gcc"]
 
 [start]
-cmd = "python bot.py"
+cmd = "python auto_trader.py"
