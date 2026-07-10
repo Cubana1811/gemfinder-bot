@@ -40,6 +40,11 @@ import requests
 from datetime import datetime, timezone, date, timedelta
 from telegram import Bot
 
+# Regime analysis runs inside this process — avoids Railway filesystem isolation
+# (market_regime.py writes to its own container; auto_trader can't read that file)
+from market_regime import analyse_regime, save_regime as save_market_regime
+from tradingview_scanner import load_regime
+
 # Import scoring engine from the signal bot (same repo, no duplication)
 from tradingview_scanner import (
     tv_scan_multi_exchange, score_setup, parse_klines,
@@ -1210,11 +1215,49 @@ async def _send_cmd_monthly(bot: Bot, chat_id):
     ) % (m.get("month", "—"), tr, m.get("wins", 0), m.get("losses", 0), wr,
          m.get("pnl", 0.0)))
 
+async def _send_cmd_scan(bot: Bot, chat_id):
+    """Diagnostic: show current scanner state without running a full scan."""
+    in_session  = is_active_session()
+    btc_ranging = btc_is_ranging()
+    regime_data = load_regime()
+    try:
+        fgi     = fetch_fear_greed()
+        btc_chg = fetch_btc_change()
+    except Exception:
+        fgi = 50; btc_chg = 0.0
+    hour     = datetime.now(timezone.utc).hour
+    cb_note  = ("\nCircuit breaker: PAUSED (%s)" % circuit_breaker.pause_reason
+                if circuit_breaker.is_paused() else "")
+    rv_secs  = REVENGE_COOLDOWN - (time.time() - last_loss_time)
+    rv_note  = ("\nAnti-revenge cooldown: %dm left" % int(rv_secs / 60)
+                if rv_secs > 0 else "")
+    await bot.send_message(chat_id=chat_id, text=(
+        "[AUTO-TRADER] Scanner Status\n\n"
+        "Session:    %s (UTC %02d:xx)\n"
+        "Trading:    %s\n"
+        "BTC ADX:    %s\n"
+        "Positions:  %d/%d open\n"
+        "Regime:     %s\n"
+        "Fear/Greed: %d\n"
+        "BTC 24h:    %+.1f%%%s%s\n\n"
+        "Commands: /stop /resume /status /help"
+    ) % (
+        "ACTIVE" if in_session else "OUTSIDE HOURS (08-22 UTC)",
+        hour,
+        "ACTIVE" if trading_active else "PAUSED",
+        "RANGING — no signals until BTC trends" if btc_ranging else "TRENDING — scans running",
+        len(open_positions), MAX_POSITIONS,
+        regime_data.get("regime", "UNKNOWN"),
+        fgi, btc_chg,
+        cb_note, rv_note,
+    ))
+
 async def _send_cmd_help(bot: Bot, chat_id):
     await bot.send_message(chat_id=chat_id, text=(
         "[AUTO-TRADER] Commands:\n"
         "/stop        — halt all new entries\n"
         "/resume      — resume trading\n"
+        "/scan        — check scanner status right now\n"
         "/status      — open positions + live P&L\n"
         "/balance     — account balance + drawdown\n"
         "/performance — all-time win rate + profit factor\n"
@@ -1376,6 +1419,7 @@ async def command_listener(bot: Bot):
     _CMD_MAP = {
         "/stop":        _send_cmd_stop,
         "/resume":      _send_cmd_resume,
+        "/scan":        _send_cmd_scan,
         "/status":      _send_cmd_status,
         "/balance":     _send_cmd_balance,
         "/performance": _send_cmd_performance,
@@ -1590,10 +1634,41 @@ async def trading_loop(bot: Bot):
                         else:                         result["tier"] = "B-TIER (STANDARD)"
 
                         if result["score"] >= MIN_SCORE:
-                            traded = await execute_trade(result, bot)
-                            if traded:
-                                seen_signals[symbol] = time.time()
-                                await asyncio.sleep(2)
+                            # Check common silent-block conditions BEFORE execute_trade
+                            # so the user always knows when a valid signal was found
+                            block_reason = ""
+                            if not trading_active:
+                                block_reason = "trading paused (/resume to restart)"
+                            elif circuit_breaker.is_paused():
+                                block_reason = "circuit breaker (%s)" % circuit_breaker.pause_reason
+                            elif len(open_positions) >= MAX_POSITIONS:
+                                block_reason = "positions full (%d/%d open)" % (
+                                    len(open_positions), MAX_POSITIONS)
+                            elif time.time() - last_loss_time < REVENGE_COOLDOWN:
+                                block_reason = "anti-revenge cooldown (%dm left)" % int(
+                                    (REVENGE_COOLDOWN - (time.time() - last_loss_time)) / 60)
+
+                            if block_reason:
+                                try:
+                                    await bot.send_message(chat_id=CHAT_ID, text=(
+                                        "[SIGNAL FOUND — BLOCKED]\n"
+                                        "%s %s  Score: %d/100  %s\n"
+                                        "Entry: $%s  |  R/R: %.2fx\n\n"
+                                        "Blocked by: %s\n"
+                                        "Use /scan for full status."
+                                    ) % (
+                                        result["direction"], symbol,
+                                        result["score"], result["tier"],
+                                        "%.5g" % result["entry"], result["rr"],
+                                        block_reason,
+                                    ))
+                                except Exception as e:
+                                    log.error("Blocked-signal alert error: %s" % e)
+                            else:
+                                traded = await execute_trade(result, bot)
+                                if traded:
+                                    seen_signals[symbol] = time.time()
+                                    await asyncio.sleep(2)
 
                 except Exception as e:
                     log.error("Error processing %s: %s" % (symbol, e))
@@ -1603,6 +1678,35 @@ async def trading_loop(bot: Bot):
 
         log.info("Scan #%d done. Positions: %d/%d" % (scan_count, len(open_positions), MAX_POSITIONS))
         await asyncio.sleep(SCAN_INTERVAL)
+
+# ── Regime Updater ──────────────────────────────────────────────────────────────
+
+async def regime_updater():
+    """
+    Runs the full regime analysis inside auto_trader's own process so the
+    result is saved to /app/data/regime.json in THIS container — accessible
+    to score_setup() via load_regime().  Runs at startup then daily at 07:00 UTC.
+    """
+    while True:
+        try:
+            regime, strength, details = analyse_regime()
+            save_market_regime({
+                "regime":     regime,
+                "strength":   strength,
+                "updated":    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                "bull_score": details.get("bull_score", 0),
+                "bear_score": details.get("bear_score", 0),
+            })
+            log.info("Regime updated: %s (%s)" % (regime, strength))
+        except Exception as e:
+            log.error("Regime updater error: %s" % e)
+
+        # Sleep until next 07:00 UTC
+        now      = datetime.now(timezone.utc)
+        next_run = now.replace(hour=7, minute=0, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=1)
+        await asyncio.sleep((next_run - now).total_seconds())
 
 # ── Entry Point ─────────────────────────────────────────────────────────────────
 
@@ -1619,6 +1723,23 @@ async def main():
     load_positions()
     log.info("Startup — balance=$%.2f  peak=$%.2f  positions=%d" % (
         paper_balance, peak_balance, len(open_positions)))
+
+    # Run regime analysis immediately so score_setup has a valid regime.json
+    # from the start (solves Railway container isolation — market_regime.py
+    # cannot share files with this service; we run the analysis here instead).
+    log.info("Running initial regime analysis...")
+    try:
+        regime, strength, details = analyse_regime()
+        save_market_regime({
+            "regime":     regime,
+            "strength":   strength,
+            "updated":    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+            "bull_score": details.get("bull_score", 0),
+            "bear_score": details.get("bear_score", 0),
+        })
+        log.info("Startup regime: %s (%s)" % (regime, strength))
+    except Exception as e:
+        log.error("Initial regime analysis error: %s" % e)
 
     bot = Bot(token=TELEGRAM_TOKEN)
 
@@ -1646,7 +1767,7 @@ async def main():
         "  TP1 hit → SL moves to breakeven + trailing SL\n\n"
         "Safety: news blackout | spread guard | funding filter\n"
         "        peak drawdown limit | portfolio heat cap\n\n"
-        "Commands: /stop /resume /status /balance\n"
+        "Commands: /stop /resume /scan /status /balance\n"
         "/performance /daily /weekly /monthly /help\n\n"
         "Heartbeat every %dh. Scanning every %ds..."
     ) % (mode, RISK_PCT, MAX_POSITIONS, DAILY_LOSS_LIMIT, MAX_LEVERAGE,
@@ -1663,6 +1784,7 @@ async def main():
         weekly_reporter(bot),
         monthly_reporter(bot),
         heartbeat(bot),
+        regime_updater(),
     )
 
 if __name__ == "__main__":

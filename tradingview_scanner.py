@@ -1212,14 +1212,11 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     # Use 4h S/R zones — better balance of recency and significance
     supports, resistances = find_sr_zones(h4h, l4h, c4h)
 
-    # ── HTF trend gate ────────────────────────────────────────────────────────
+    # ── HTF trend context (penalty instead of hard gate) ─────────────────────
+    # Previously a hard gate — converted to penalty so coins recovering from
+    # below EMA200 can still qualify if enough other factors align.
     daily_bull = price > ema200_1d if ema200_1d else None
     daily_bear = price < ema200_1d if ema200_1d else None
-    if daily_bull is not None:
-        if tv_rating > 0 and daily_bear:
-            return None
-        if tv_rating < 0 and daily_bull:
-            return None
 
     # ── Funding rate gate ─────────────────────────────────────────────────────
     if tv_rating > 0 and funding > 0.05:
@@ -1371,11 +1368,16 @@ def score_setup(tv, k1h_data, k4h_data, k1d_data, market, funding=0.0, oi_chg=0.
     elif trend_4h == "DOWNTREND":
         short_score += 5
 
-    # Daily EMA bonus
+    # Daily EMA bonus / penalty
     if daily_bull and ema50_1d and price > ema50_1d:
         long_score += 8; long_reasons.append("Price above Daily EMA 50 & 200 (with trend)")
     if daily_bear and ema50_1d and price < ema50_1d:
         short_score += 8; short_reasons.append("Price below Daily EMA 50 & 200 (with trend)")
+    if daily_bull is not None:
+        if tv_rating > 0 and daily_bear:
+            long_score -= 25  # below daily EMA200 — major headwind, needs strong other factors
+        if tv_rating < 0 and daily_bull:
+            short_score -= 25  # above daily EMA200 — major headwind for shorts
 
     # 6. S/R proximity (max 10)
     if supports:
